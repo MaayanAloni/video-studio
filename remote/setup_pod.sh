@@ -4,8 +4,10 @@
 # Run this ON THE POD (paste into its web terminal or over SSH):
 #   curl -sL <this file> -o setup_pod.sh && bash setup_pod.sh full
 #
-#   full   ~120 GB  unquantised fp16 weights — best quality, needs >=48 GB VRAM
-#   fast    ~40 GB  Q8 quantised — good, fits a 24 GB card
+#   full   ~120 GB  Wan 2.2 unquantised fp16 — best quality, Apache-2.0, needs >=48 GB VRAM
+#   fast    ~40 GB  Wan 2.2 Q8 quantised — good, fits a 24 GB card
+#   h3      ~43 GB  MiniMax H3 (pruned int8 + nvfp4) — strongest model, but commercial
+#                   use of its output needs a licence from Comfy. Read REMOTE.md first.
 #
 # By default ComfyUI binds to 127.0.0.1 only, so nothing is exposed to the
 # internet; you reach it through an SSH tunnel. Pass a token as $2 to instead
@@ -70,7 +72,15 @@ fast = [
     (QT, "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q8_0.gguf", "diffusion_models"),
     (QT, "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q8_0.gguf", "diffusion_models"),
 ]
-items = common + (full if mode == "full" else fast)
+H3 = "Comfy-Org/MiniMax-H3"
+h3 = [
+    (H3, "split_files/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", "diffusion_models"),
+    (H3, "split_files/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "text_encoders"),
+    (H3, "split_files/vae/minimax_h3_video_vae_fp16.safetensors", "vae"),
+    (H3, "split_files/vae/minimax_h3_audio_vae_fp32.safetensors", "vae"),
+    (H3, "split_files/loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors", "loras"),
+]
+items = common + {"full": full, "fast": fast, "h3": h3}.get(mode, full)
 for repo, path, sub in items:
     dst = os.path.join(comfy, "models", sub, os.path.basename(path))
     if os.path.exists(dst):

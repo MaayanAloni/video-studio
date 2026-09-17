@@ -16,6 +16,7 @@ from PIL import Image  # noqa: E402
 
 import comfy  # noqa: E402
 import jobs  # noqa: E402
+import runpod as rp  # noqa: E402
 import settings as settings_mod  # noqa: E402
 import media  # noqa: E402
 import workflows as wf  # noqa: E402
@@ -114,6 +115,11 @@ def get_settings():
 
 @app.put("/api/settings")
 def put_settings(body: dict):
+    p = dict(body.get("runpod") or {})
+    if p.get("api_key") == "********":
+        p.pop("api_key")
+    if p:
+        settings_mod.save({"runpod": p})
     r = dict(body.get("remote") or {})
     if r.get("token") == "********":      # unchanged placeholder from the UI
         r.pop("token")
@@ -123,6 +129,130 @@ def put_settings(body: dict):
             u = "http://" + u
         r["url"] = u
     return settings_mod.public(settings_mod.save({"remote": r}))
+
+
+# ----------------------------------------------------------------- RunPod
+@app.get("/api/runpod/catalog")
+def rp_catalog():
+    """Live GPU prices. Needs no API key, so the picker works before setup."""
+    try:
+        return {"ok": True, "gpus": rp.catalog(), "datacenters": rp.PREFERRED_DCS}
+    except rp.RunPodError as e:
+        return {"ok": False, "error": str(e), "gpus": [], "datacenters": rp.PREFERRED_DCS}
+
+
+@app.get("/api/runpod/status")
+def rp_status():
+    cfg = settings_mod.load()["runpod"]
+    out = {"configured": bool(cfg.get("api_key")), "pod_id": cfg.get("pod_id", ""),
+           "gpu": cfg.get("gpu"), "datacenter": cfg.get("datacenter"),
+           "tunnel": rp.tunnel_status(), "pod": None}
+    if cfg.get("api_key") and cfg.get("pod_id"):
+        try:
+            pod = rp.get_pod(cfg["api_key"], cfg["pod_id"])
+            ip, port = rp.ssh_target(pod)
+            out["pod"] = {"status": pod.get("desiredStatus"), "ip": ip, "ssh_port": port,
+                          "cost_hr": pod.get("costPerHr") or pod.get("adjustedCostPerHr"),
+                          "started": pod.get("lastStartedAt"), "name": pod.get("name")}
+        except rp.RunPodError as e:
+            out["error"] = str(e)
+    return out
+
+
+@app.post("/api/runpod/launch")
+def rp_launch(body: dict = None):
+    """Rent a GPU. Costs money from the moment the pod is created — only ever
+    triggered by an explicit click in the UI."""
+    body = body or {}
+    cfg = settings_mod.load()["runpod"]
+    key = cfg.get("api_key")
+    if not key:
+        return JSONResponse({"error": "set your RunPod API key first"}, status_code=400)
+    gpu = body.get("gpu") or cfg["gpu"]
+    dc = body.get("datacenter") or cfg["datacenter"]
+    try:
+        vol = cfg.get("volume_id")
+        if body.get("use_volume", True) and not vol:
+            size = int(body.get("volume_gb") or 300)
+            vol = rp.create_volume(key, "video-studio-models", size, dc).get("id", "")
+        pod = rp.create_pod(key, gpu, dc, vol)
+        settings_mod.save({"runpod": {"pod_id": pod["id"], "gpu": gpu, "datacenter": dc, "volume_id": vol or ""}})
+        rp.set_pod(pod["id"])
+        return {"ok": True, "pod_id": pod["id"], "cost_hr": pod.get("costPerHr"),
+                "volume_id": vol, "note": "pod created; poll /api/runpod/status until it is RUNNING"}
+    except rp.RunPodError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.post("/api/runpod/connect")
+def rp_connect():
+    """Open the SSH tunnel to the running pod and point the remote engine at it."""
+    cfg = settings_mod.load()["runpod"]
+    if not (cfg.get("api_key") and cfg.get("pod_id")):
+        return JSONResponse({"error": "no pod"}, status_code=400)
+    try:
+        pod = rp.get_pod(cfg["api_key"], cfg["pod_id"])
+        ip, port = rp.ssh_target(pod)
+        if not ip:
+            return JSONResponse({"error": "pod has no public IP yet — still starting"}, status_code=409)
+        url = rp.open_tunnel(ip, port)
+        settings_mod.save({"remote": {"url": url, "enabled": True,
+                                      "label": f"RunPod {cfg.get('gpu','')} · {cfg.get('datacenter','')}"}})
+        eng = comfy.Engine(url, local=False)
+        ok = False
+        for _ in range(30):
+            if eng.alive(5):
+                ok = True
+                break
+            time.sleep(2)
+        return {"ok": ok, "url": url, "engine_reachable": ok,
+                "hint": "" if ok else "tunnel is up but ComfyUI is not answering yet — it can take minutes on first boot"}
+    except rp.RunPodError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.post("/api/runpod/provision")
+def rp_provision(body: dict = None):
+    """Install ComfyUI deps and download models onto the pod, over SSH."""
+    body = body or {}
+    cfg = settings_mod.load()["runpod"]
+    try:
+        pod = rp.get_pod(cfg["api_key"], cfg["pod_id"])
+    except rp.RunPodError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    ip, port = rp.ssh_target(pod)
+    if not ip:
+        return JSONResponse({"error": "pod not reachable yet"}, status_code=409)
+    script = os.path.join(ROOT, "remote", "setup_pod.sh")
+    mode = body.get("models") or cfg.get("models") or "full"
+    logf = os.path.join(ROOT, "logs", "provision.log")
+    with open(script) as f, open(logf, "a") as out:
+        subprocess.Popen(["ssh", "-i", rp.KEY, "-o", "StrictHostKeyChecking=accept-new",
+                          "-o", "UserKnownHostsFile=" + os.path.join(rp.SSH_DIR, "known_hosts"),
+                          f"root@{ip}", "-p", str(port), "bash -s", mode],
+                         stdin=f, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+    return {"ok": True, "log": "logs/provision.log",
+            "note": "downloading models on the pod; watch Logs → provision"}
+
+
+@app.post("/api/runpod/disconnect")
+def rp_disconnect(body: dict = None):
+    """Close the tunnel and optionally stop or terminate the pod (stops billing)."""
+    body = body or {}
+    rp.close_tunnel()
+    settings_mod.save({"remote": {"enabled": False}})
+    cfg = settings_mod.load()["runpod"]
+    action = body.get("action", "stop")
+    if cfg.get("api_key") and cfg.get("pod_id") and action in ("stop", "terminate"):
+        try:
+            if action == "terminate":
+                rp.terminate_pod(cfg["api_key"], cfg["pod_id"])
+                settings_mod.save({"runpod": {"pod_id": ""}})
+            else:
+                rp.stop_pod(cfg["api_key"], cfg["pod_id"])
+        except rp.RunPodError as e:
+            return {"ok": False, "error": str(e)}
+    return {"ok": True, "action": action}
 
 
 @app.post("/api/remote/test")
@@ -193,7 +323,8 @@ def frame_as_upload(vid: str, n: int):
     return {"name": name, "url": f"/uploads/{name}"}
 
 
-LOG_FILES = {"engine": "engine.log", "server": "server.log", "downloads": "download2.log"}
+LOG_FILES = {"engine": "engine.log", "server": "server.log", "downloads": "download2.log",
+             "provision": "provision.log", "tunnel": "tunnel.log"}
 _ANSI = re.compile(r"\x1B\[[0-9;]*[mGKHF]")
 
 

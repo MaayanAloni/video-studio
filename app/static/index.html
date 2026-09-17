@@ -238,6 +238,33 @@
     </div>
     <div id="rResult" class="hint"></div>
   </div>
+
+  <div class="panel form" style="max-width:680px;margin-top:18px">
+    <h3 style="margin-top:0">Rent a GPU from RunPod</h3>
+    <div class="hint">You pay RunPod for compute only. The models are open weights we download onto the pod —
+      nobody charges you for the model. Billing starts the moment a pod is created and stops when you stop it.</div>
+
+    <label>RunPod API key</label>
+    <input type="password" id="pKey" placeholder="paste key — stored on this Mac only, never shown again">
+    <div class="hint">Get one at <code>console.runpod.io/user/settings</code> → API Keys → Create API Key.</div>
+
+    <div class="row2">
+      <div><label>GPU</label><select id="pGpu"></select></div>
+      <div><label>Region</label><select id="pDc"></select></div>
+    </div>
+    <div class="hint" id="pCost"></div>
+
+    <label class="chk"><input type="checkbox" id="pVol" checked> Keep a 300&nbsp;GB model volume (~$21/mo) so the download happens once</label>
+
+    <div class="tools" style="margin-top:16px">
+      <button id="pLaunch">① Rent GPU</button>
+      <button id="pProvision">② Install models</button>
+      <button id="pConnect">③ Connect</button>
+      <button id="pStop">Stop (billing off)</button>
+    </div>
+    <button class="ghost" id="pTerminate" style="margin-top:8px;width:100%">Terminate pod &amp; delete it</button>
+    <div id="pStatus" class="hint"></div>
+  </div>
 </section>
 
 <dialog id="pick"><h3>Append which clip?</h3><div id="pickGrid" class="grid small"></div><button class="ghost" onclick="pick.close()">Cancel</button></dialog>

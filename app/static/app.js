@@ -20,7 +20,7 @@ function show(view) {
   if (view !== 'editor') $('#vid').pause();
   if (view === 'library') renderLibrary();
   if (view === 'logs') refreshLogs(true);
-  if (view === 'settings') loadSettings();
+  if (view === 'settings') { loadSettings(); rpLoadCatalog().then(rpPoll); }
 }
 $$('.navbtn').forEach(b => b.onclick = () => show(b.dataset.view));
 
@@ -409,6 +409,10 @@ async function loadSettings() {
   $('#rEnabled').checked = !!r.enabled; $('#rUrl').value = r.url || '';
   $('#rToken').value = r.token || ''; $('#rLabel').value = r.label || '';
   $('#rDefault').checked = !!r.default_for_new;
+  const p = s.runpod || {};
+  $('#pKey').value = p.api_key || '';
+  if (p.gpu) $('#pGpu').value = p.gpu;
+  if (p.datacenter) $('#pDc').value = p.datacenter;
 }
 $('#rSave').onclick = async () => {
   $('#rResult').textContent = 'saving…';
@@ -432,6 +436,74 @@ $('#rTest').onclick = async () => {
       ${m.count} diffusion files`;
   } catch (e) { $('#rResult').innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`; }
 };
+
+/* ------------------------------------------------------------ runpod */
+let rpCat = null;
+async function rpLoadCatalog() {
+  if (rpCat) return rpCat;
+  rpCat = await api('/api/runpod/catalog');
+  $('#pGpu').innerHTML = (rpCat.gpus || []).map(g =>
+    `<option value="${esc(g.id)}" data-hr="${g.usd_hr}">${esc(g.name)} · ${g.vram_gb} GB · $${g.usd_hr}/hr</option>`).join('')
+    || '<option>could not load GPU list</option>';
+  $('#pDc').innerHTML = (rpCat.datacenters || []).map(d => `<option>${esc(d)}</option>`).join('');
+  rpCost();
+  return rpCat;
+}
+function rpCost() {
+  const o = $('#pGpu').selectedOptions[0];
+  const hr = o && +o.dataset.hr;
+  $('#pCost').textContent = hr ? `$${hr.toFixed(2)}/hr — a 5-second Ultra clip is roughly $${(hr * 0.4).toFixed(2)}. Storage is billed separately and continues while the pod is stopped.` : '';
+}
+$('#pGpu').onchange = rpCost;
+const rpSay = (t, err) => $('#pStatus').innerHTML = err ? `<span style="color:var(--err)">${esc(t)}</span>` : esc(t);
+
+async function rpSaveKey() {
+  const k = $('#pKey').value.trim();
+  if (k && k !== '********') await api('/api/settings', { method: 'PUT', body: { runpod: { api_key: k } } });
+}
+$('#pLaunch').onclick = async () => {
+  if (!confirm('Rent a GPU now? Billing starts immediately and continues until you press Stop.')) return;
+  await rpSaveKey();
+  rpSay('renting…');
+  try {
+    const r = await api('/api/runpod/launch', { method: 'POST', body: {
+      gpu: $('#pGpu').value, datacenter: $('#pDc').value, use_volume: $('#pVol').checked } });
+    rpSay(`pod ${r.pod_id} created ($${r.cost_hr}/hr). It can take several minutes to boot — then press Install models.`);
+    rpPoll();
+  } catch (e) { rpSay(e.message, true); }
+};
+$('#pProvision').onclick = async () => {
+  rpSay('installing ComfyUI and downloading models on the pod…');
+  try { const r = await api('/api/runpod/provision', { method: 'POST', body: {} }); rpSay(r.note); }
+  catch (e) { rpSay(e.message, true); }
+};
+$('#pConnect').onclick = async () => {
+  rpSay('opening SSH tunnel…');
+  try {
+    const r = await api('/api/runpod/connect', { method: 'POST', body: {} });
+    rpSay(r.engine_reachable ? `connected via ${r.url} — Ultra quality is now available.` : (r.hint || 'tunnel open, engine not answering yet'));
+    await pollStatus();
+  } catch (e) { rpSay(e.message, true); }
+};
+$('#pStop').onclick = async () => {
+  if (!confirm('Stop the pod? Billing for compute stops. Your model volume is kept.')) return;
+  try { await api('/api/runpod/disconnect', { method: 'POST', body: { action: 'stop' } }); rpSay('pod stopped — compute billing off.'); await pollStatus(); }
+  catch (e) { rpSay(e.message, true); }
+};
+$('#pTerminate').onclick = async () => {
+  if (!confirm('Terminate and DELETE this pod? This cannot be undone. The model volume survives.')) return;
+  try { await api('/api/runpod/disconnect', { method: 'POST', body: { action: 'terminate' } }); rpSay('pod terminated.'); await pollStatus(); }
+  catch (e) { rpSay(e.message, true); }
+};
+async function rpPoll() {
+  try {
+    const s = await api('/api/runpod/status');
+    if (!s.pod_id) return;
+    const p = s.pod || {};
+    const up = s.tunnel?.up;
+    rpSay(`pod ${s.pod_id} · ${p.status || '?'} · ${p.ip ? `${p.ip}:${p.ssh_port}` : 'no IP yet'} · $${p.cost_hr || '?'}/hr · tunnel ${up ? 'up' : 'down'}`);
+  } catch { /* not configured */ }
+}
 
 /* ------------------------------------------------------------ boot */
 (async function boot() {

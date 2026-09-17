@@ -16,7 +16,15 @@ DEFAULT = {
         "token": "",           # optional bearer token, if the pod runs an auth proxy
         "label": "",           # free text, e.g. "RunPod H100 / Canada"
         "default_for_new": False,
-    }
+    },
+    "runpod": {
+        "api_key": "",         # stays on this machine; never sent to the browser
+        "pod_id": "",
+        "gpu": "NVIDIA A100 80GB PCIe",
+        "datacenter": "CA-MTL-3",
+        "volume_id": "",
+        "models": "full",      # 'full' = unquantised Wan fp16, 'h3' = MiniMax H3
+    },
 }
 
 
@@ -63,8 +71,10 @@ def engine_for(compute: str) -> comfy.Engine:
 
 
 def public(s: dict = None) -> dict:
-    """Settings safe to hand to the browser — never echo the token back."""
+    """Settings safe to hand to the browser — never echo secrets back."""
     s = s or load()
     r = dict(s["remote"])
     r["token"] = "" if not r.get("token") else "********"
-    return {"remote": r}
+    rp = dict(s["runpod"])
+    rp["api_key"] = "********" if rp.get("api_key") else ""
+    return {"remote": r, "runpod": rp}
