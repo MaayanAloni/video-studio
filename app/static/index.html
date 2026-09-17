@@ -13,6 +13,7 @@
   <button class="navbtn" data-view="editor">✂ Editor</button>
   <button class="navbtn" data-view="library">▦ Library</button>
   <button class="navbtn" data-view="queue">≡ Queue <span id="queueBadge" class="badge" hidden></span></button>
+  <button class="navbtn" data-view="logs">▤ Logs</button>
   <div class="spacer"></div>
   <div id="sys" class="sys"></div>
 </aside>
@@ -155,6 +156,7 @@
           <button id="tJoin">Append clip…</button>
           <button id="tFrameRef">Frame → new video</button>
           <button id="tFrameSave">Save frame PNG</button>
+          <button id="tReuse">Reuse settings</button>
         </div>
         <div class="error" id="edErr"></div>
         <div id="edJobs"></div>
@@ -178,6 +180,23 @@
   <div id="jobList"></div>
 </section>
 </main>
+
+<!-- ============================ LOGS ============================ -->
+<section id="view-logs" class="view">
+  <div class="titlebar"><h2>Logs</h2>
+    <select id="logPick" style="width:auto">
+      <option value="engine">engine — model loading, sampling steps, errors</option>
+      <option value="server">server — job worker, API, tracebacks</option>
+      <option value="downloads">downloads — model fetches</option>
+    </select>
+    <label class="chk"><input type="checkbox" id="logFollow" checked> Follow</label>
+    <span class="spacer"></span>
+    <span id="logInfo" class="muted"></span>
+    <button id="logCopy">Copy</button>
+  </div>
+  <pre id="logBox" class="logbox">loading…</pre>
+  <div class="hint">Terminal equivalent: <code>~/video-studio/logs.sh engine</code> &nbsp;·&nbsp; raw files live in <code>~/video-studio/logs/</code></div>
+</section>
 
 <dialog id="pick"><h3>Append which clip?</h3><div id="pickGrid" class="grid small"></div><button class="ghost" onclick="pick.close()">Cancel</button></dialog>
 <input type="file" id="file" accept="image/*" hidden>

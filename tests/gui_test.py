@@ -51,6 +51,18 @@ with sync_playwright() as p:
     check("regen needs prompt", "Describe" in pg.inner_text("#edErr"))
     pg.keyboard.press("Escape"); check("esc clears selection", pg.evaluate("S.sel") is None and not pg.is_enabled("#btnRegen"))
     pg.screenshot(path=f"{OUT}/4_editor.png")
+    # full round trip: tool click -> job -> editor auto-switches to the new version
+    before = pg.evaluate("S.cur.id"); nver = pg.locator("#edVersions option").count()
+    pg.click("#tReverse")
+    pg.wait_for_function(f"S.cur && S.cur.id !== '{before}'", timeout=120000)
+    check("editor follows new version", pg.evaluate("S.cur.op") == "reverse" and pg.locator("#edVersions option").count() == nver + 1)
+    made = pg.evaluate("S.cur.id")
+    pg.select_option("#edVersions", before); pg.wait_for_timeout(1200)
+    check("version dropdown = undo", pg.evaluate("S.cur.id") == before)
+    pg.click("#tReuse"); pg.wait_for_timeout(400)
+    check("reuse settings fills create form", pg.is_visible("#view-create") and (pg.input_value("#prompt") != "" or pg.locator("#shots .shot").count() > 0))
+    pg.evaluate(f"fetch('/api/videos/{made}', {{method:'DELETE'}})")
+    pg.click("[data-view=library]"); pg.wait_for_timeout(800); pg.locator("#grid .tile").first.click(); pg.wait_for_timeout(1500)
     pg.click("[data-view=queue]"); pg.wait_for_timeout(500); check("queue lists jobs", pg.locator("#jobList .job").count() >= 1)
     pg.screenshot(path=f"{OUT}/5_queue.png")
     # narrow layout must not scroll sideways

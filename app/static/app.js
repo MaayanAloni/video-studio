@@ -19,6 +19,7 @@ function show(view) {
   $$('.navbtn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   if (view !== 'editor') $('#vid').pause();
   if (view === 'library') renderLibrary();
+  if (view === 'logs') refreshLogs(true);
 }
 $$('.navbtn').forEach(b => b.onclick = () => show(b.dataset.view));
 
@@ -135,7 +136,9 @@ function jobHTML(j) {
     ${run || j.status === 'queued' ? `<button data-cancel="${j.id}">Cancel</button>` : `<button data-del="${j.id}">✕</button>`}</div>
     <div class="p">${esc(j.params.prompt || j.params.segments?.[0]?.prompt || '')}</div>
     ${run ? `<div class="bar"><div style="width:${pct}%"></div></div>` : ''}
-    ${j.error ? `<div class="error">${esc(j.error)}</div>` : ''}</div>`;
+    ${j.error ? `<div class="error">${esc(j.error)}</div>` : ''}
+    ${run ? `<div class="prevwrap" id="pw_${j.id}" hidden><img class="jobprev" id="prev_${j.id}" alt="">
+      <div class="prevcap">live preview — approximate, refines as it samples</div></div>` : ''}</div>`;
 }
 document.addEventListener('click', async e => {
   const t = e.target.closest('[data-open],[data-cancel],[data-del]');
@@ -159,6 +162,18 @@ async function poll() {
     $('#activeJob').innerHTML = active.filter(j => j.type === 'generate').map(jobHTML).join('');
     const mine = S.jobs.filter(j => j.params.video && S.cur && lineage(S.cur.id).has(j.params.video) && (j.status === 'running' || j.status === 'queued' || j.status === 'error')).slice(0, 4);
     $('#edJobs').innerHTML = mine.map(jobHTML).join('');
+  }
+  // refresh live previews (separate from the HTML render so the <img> never flickers)
+  for (const j of S.jobs) {
+    if (j.status !== 'running') continue;
+    for (const el of $$(`#prev_${j.id}`)) {
+      const stamp = j.preview_at || 0;
+      if (stamp && el.dataset.at !== String(stamp)) {
+        el.dataset.at = String(stamp);
+        el.onload = () => { const w = el.closest('.prevwrap'); if (w) w.hidden = false; };
+        el.src = `/api/jobs/${j.id}/preview?t=${stamp}`;
+      }
+    }
   }
   let newDone = null;
   for (const j of S.jobs) if (j.status === 'done' && !S.seenDone.has(j.id)) { S.seenDone.add(j.id); if (!S.firstPoll) newDone = newDone || j; }
@@ -184,7 +199,8 @@ async function pollStatus() {
     S.status = await api('/api/status');
     const m = S.status.models;
     $('#sys').innerHTML = `<div><span class="dot ${S.status.engine ? 'ok' : 'warn'}"></span>engine ${S.status.engine ? 'ready' : 'starting…'}</div>
-      <div><span class="dot ${m.draft ? 'ok' : ''}"></span>5B draft model</div><div><span class="dot ${m.hq ? 'ok' : ''}"></span>14B HQ model</div>
+      <div><span class="dot ${m.draft ? 'ok' : ''}"></span>5B draft model</div><div><span class="dot ${m.hq ? 'ok' : ''}"></span>14B image&rarr;video</div>
+      <div><span class="dot ${m.t2v_hq ? 'ok' : ''}"></span>14B text&rarr;video</div>
       <div>${S.status.disk_free_gb} GB free</div>`;
     updateHints();
   } catch { /* poll() reports offline */ }
@@ -330,6 +346,39 @@ $('#tFrameRef').onclick = async () => {
   S.images.start_image = r; setMode('i2v'); show('create');
 };
 $('#tFrameSave').onclick = () => { const a = document.createElement('a'); a.href = `/api/videos/${S.cur.id}/frame/${frameOf()}`; a.download = `${S.cur.name}_f${frameOf()}.png`; a.click(); };
+
+$('#tReuse').onclick = () => {
+  // walk up to the original generation and load its settings back into the Create form
+  let v = S.cur; while (v && v.op !== 'generate' && v.parent) v = S.videos.find(x => x.id === v.parent);
+  const p = v?.params || {};
+  if (p.segments) { setMode('story'); $('#shots').innerHTML = ''; p.segments.forEach(addShot); }
+  else { setMode(p.start_image || p.end_image ? 'i2v' : 't2v'); $('#prompt').value = p.prompt || ''; $('#seconds').value = p.seconds || 5; }
+  for (const k of ['start_image', 'end_image']) if (p[k]) S.images[k] = { name: p[k], url: '/uploads/' + p[k] }; else delete S.images[k];
+  $('#aspect').value = p.aspect || '16:9'; $('#resolution').value = p.resolution || '480p'; $('#camera').value = p.camera || '';
+  $('#negative').value = p.negative || ''; $('#style').value = p.style || ''; $('#seed').value = v?.seed ?? '';
+  if (p.quality) $(`[data-q=${p.quality}]`).click();
+  syncDrops(); updateHints(); show('create');
+};
+
+/* ------------------------------------------------------------ logs */
+let logBusy = false;
+async function refreshLogs(force) {
+  if (!force && !$('#view-logs').classList.contains('active')) return;
+  if (logBusy) return;
+  logBusy = true;
+  try {
+    const r = await api(`/api/logs/${$('#logPick').value}?lines=600`);
+    const box = $('#logBox');
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+    box.innerHTML = esc(r.text).replace(/^.*(Traceback|Error|error|FAIL|interrupted).*$/gm, m => `<span class="err">${m}</span>`);
+    $('#logInfo').textContent = `${(r.size / 1024).toFixed(0)} KB on disk`;
+    if (force || ($('#logFollow').checked && atBottom)) box.scrollTop = box.scrollHeight;
+  } catch (e) { $('#logBox').textContent = 'could not read log: ' + e.message; }
+  logBusy = false;
+}
+$('#logPick').onchange = () => refreshLogs(true);
+$('#logCopy').onclick = () => navigator.clipboard.writeText($('#logBox').textContent);
+setInterval(() => refreshLogs(false), 2000);
 
 /* ------------------------------------------------------------ boot */
 (async function boot() {

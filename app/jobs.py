@@ -15,6 +15,8 @@ import workflows as wf
 
 JOBS_FILE = os.path.join(media.DATA, "jobs.json")
 PERF_FILE = os.path.join(media.DATA, "perf.json")
+PREVIEW_DIR = os.path.join(media.DATA, "previews")
+os.makedirs(PREVIEW_DIR, exist_ok=True)
 MAX_SECONDS = 5.0  # longest single model pass; anything longer is chained
 
 ASPECTS = {"16:9": (16, 9), "9:16": (9, 16), "1:1": (1, 1), "4:3": (4, 3), "3:4": (3, 4), "21:9": (21, 9)}
@@ -124,6 +126,12 @@ def validate(jtype, p):
         for k in ("start_image", "end_image"):
             if p.get(k) and not os.path.exists(_upload_path(p[k])):
                 raise ValueError(f"{k} not found")
+        qn = p.get("quality", "standard")
+        if wf.QUALITY[qn]["model"] == "14b":
+            w, h = dims(p.get("aspect", "16:9"), p.get("resolution", "480p"), 16)
+            secs = min(float(p.get("seconds") or 5), MAX_SECONDS)
+            cfg = p.get("cfg") or wf.QUALITY[qn]["cfg"]
+            check_fits(w, h, wf.snap_len(round(secs * 16)), cfg, qn, p.get("force"))
     elif jtype in ("extend", "edit_range", "interpolate", "upscale", "trim", "join", "reverse"):
         if not os.path.exists(media.vdir(p.get("video", "?"))):
             raise ValueError("video not found")
@@ -138,6 +146,40 @@ def validate(jtype, p):
             raise ValueError("second video not found")
     else:
         raise ValueError("unknown job type")
+
+
+# Calibrated on THIS machine (M4 Pro 24 GB). cost = pixels x frames x cfg_batches x expert_GB.
+#   1.3e8  480p / 33f / cfg1   / Q4  -> completed, 19.8 min          (measured)
+#   3.2e8  480p / 81f / cfg1   / Q4  -> slow but progressing         (measured)
+#   5.7e8  720p / 33f / cfg3.5 / Q4  -> page-thrashed, 0 steps/30min (measured)
+MEM_BUDGET = 4.0e8
+
+
+def mem_cost(w, h, frames, cfg, expert_gb=9.65):
+    return w * h * frames * (2 if cfg and cfg > 1.05 else 1) * expert_gb
+
+
+def check_fits(w, h, frames, cfg, quality, force=False):
+    """Refuse configurations that will page-thrash instead of computing."""
+    if force or wf.QUALITY[quality]["model"] != "14b":
+        return
+    mode = wf.QUALITY[quality].get("quant", "fast")
+    cost = mem_cost(w, h, frames, cfg, wf.expert_gb(wf.MODELS["14b"]["high"], mode))
+    if cost <= MEM_BUDGET:
+        return
+    over = cost / MEM_BUDGET
+    tips = []
+    if w * h > 700_000:
+        tips.append("drop to 480p")
+    if cfg and cfg > 1.05:
+        tips.append("use Pro instead of Master (8 steps, no doubled CFG batch)")
+    if frames > 33:
+        tips.append("shorten the clip")
+    raise ValueError(
+        f"This needs roughly {over:.1f}x more memory than this Mac can hold, so it would "
+        f"page to disk instead of computing (a 720p Master job stalled for 30 min on step 1). "
+        f"Try: {'; '.join(tips) or 'a smaller clip'}. Add \"force\": true to run it anyway."
+    )
 
 
 def _upload_path(name):
@@ -175,6 +217,15 @@ class Ctx:
     def stage(self, s):
         self.job["stage"] = s
 
+    def preview(self, img: bytes):
+        """Newest in-progress frame, written atomically so the UI never reads a torn file."""
+        p = os.path.join(PREVIEW_DIR, self.job["id"] + ".jpg")
+        tmp = p + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(img)
+        os.replace(tmp, p)
+        self.job["preview_at"] = time.time()
+
     def progress(self, frac, node):
         if frac is None:
             return
@@ -193,7 +244,23 @@ def render_clip(ctx: Ctx, clip: dict, label: str) -> list[str]:
         if clip.get(k):
             clip[k] = comfy.upload_image(clip[k])
     ctx.t_clip = time.time()
-    files = comfy.run(wf.build(clip), ctx.progress, ctx.cancelled)
+    try:
+        files = comfy.run(wf.build(clip), ctx.progress, ctx.cancelled, on_preview=ctx.preview)
+    except (comfy.Cancelled, comfy.EngineError):
+        raise
+    except Exception as e:  # noqa: BLE001 - connection dropped: the engine died (usually out of memory)
+        if ctx.cancelled():
+            raise comfy.Cancelled()
+        ctx.stage("engine crashed - waiting for restart, will retry once")
+        for _ in range(90):
+            if comfy.alive():
+                break
+            time.sleep(2)
+        else:
+            raise comfy.EngineError(f"engine crashed and did not come back ({e})")
+        ctx.stage(label + " (retry)")
+        ctx.t_clip = time.time()
+        files = comfy.run(wf.build(clip), ctx.progress, ctx.cancelled, on_preview=ctx.preview)
     dst = os.path.join(ctx.tmp, f"clip{ctx.done:03d}")
     os.makedirs(dst)
     out = []
@@ -227,6 +294,14 @@ def chain(ctx, segs, base, start_image, end_image, fps, max_frames):
     return frames, marks
 
 
+def t2v14_ready():
+    m = wf.MODELS["14b"]
+    base = os.path.join(media.ROOT, "engine", "models")
+    unets = [os.path.join(base, "diffusion_models", wf.pick_gguf(m[k], "max")) for k in ("t2v_high", "t2v_low")]
+    loras = [os.path.join(base, "loras", m[k]) for k in ("t2v_lora_high", "t2v_lora_low")]
+    return all(os.path.exists(p) for p in unets + loras)
+
+
 def seed_of(p):
     s = p.get("seed")
     return int(s) if s not in (None, "", -1, "-1") else random.randint(1, 2**31 - 1)
@@ -253,7 +328,7 @@ def job_generate(job):
                 for sec in split_seconds(float(p.get("seconds") or 5))]
     start = _upload_path(p["start_image"]) if p.get("start_image") else None
     end = _upload_path(p["end_image"]) if p.get("end_image") else None
-    needs_still = q["model"] == "14b" and not start
+    needs_still = q["model"] == "14b" and not start and not (len(segs) == 1 and end) and not t2v14_ready()
     ctx = Ctx(job, len(segs) + (1 if needs_still else 0))
     try:
         base = {"negative": p.get("negative"), "width": w, "height": h, "seed": seed_of(p), "quality": quality,
@@ -261,10 +336,10 @@ def job_generate(job):
         if needs_still:
             # 14B is image->video: paint the opening frame from text with the 5B model first
             sw, sh = dims(p.get("aspect", "16:9"), "720p", 32)
-            still = render_clip(ctx, dict(base, prompt=segs[0]["prompt"], width=sw, height=sh, frames=1,
+            still = render_clip(ctx, dict(base, prompt=segs[0]["prompt"], width=sw, height=sh, frames=17,
                                           quality="draft", steps=24, cfg=5.0, start_image=None, end_image=None),
                                 "painting opening frame")
-            start = still[0]
+            start = still[-1]  # the 5B model paints poor single stills; the end of a short clip is clean
         frames, marks = chain(ctx, segs, base, start, end, fps, wf.snap_len(int(MAX_SECONDS * fps)))
         ctx.stage("encoding")
         info = {"op": "generate", "prompt": p.get("prompt") or segs[0]["prompt"], "params": p, "seed": base["seed"],
@@ -297,7 +372,7 @@ def job_extend(job):
         end = _upload_path(p["end_image"]) if p.get("end_image") else None
         new, marks = chain(ctx, segs, base, src[-1], end, fps, 81)
         off = len(src) - 1
-        marks = [{"start": k["start"] + off, "end": k["end"] + off, "prompt": k["prompt"]} for k in marks]
+        marks = [{"start": max(k["start"] + off, len(src)), "end": k["end"] + off, "prompt": k["prompt"]} for k in marks]
         ctx.stage("encoding")
         return media.create_video(src + new[1:], fps, {
             "op": "extend", "prompt": m.get("prompt"), "params": p, "parent": m["id"], "name": m.get("name"),
@@ -423,10 +498,17 @@ def _worker():
                 job.update(status="error", stage="error", error=str(e)[:800])
             finally:
                 _cancel.discard(job["id"])
+                try:
+                    os.remove(os.path.join(PREVIEW_DIR, job["id"] + ".jpg"))
+                except OSError:
+                    pass
                 job["finished"] = time.time()
                 _persist()
 
 
 def start():
+    import glob
+    for d in glob.glob(os.path.join(media.DATA, "vs_*")) + [os.path.join(comfy.ENGINE_DIR, "output", "vs")]:
+        shutil.rmtree(d, ignore_errors=True)  # leftovers from a crash / force-quit
     _load()
     threading.Thread(target=_worker, daemon=True).start()

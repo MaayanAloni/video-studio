@@ -12,6 +12,10 @@ items = [
  (C, "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors", "loras"),
  (Q, "HighNoise/Wan2.2-I2V-A14B-HighNoise-Q4_K_M.gguf", "diffusion_models"),
  (Q, "LowNoise/Wan2.2-I2V-A14B-LowNoise-Q4_K_M.gguf", "diffusion_models"),
+ ("QuantStack/Wan2.2-T2V-A14B-GGUF", "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q4_K_M.gguf", "diffusion_models"),
+ ("QuantStack/Wan2.2-T2V-A14B-GGUF", "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q4_K_M.gguf", "diffusion_models"),
+ (C, "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors", "loras"),
+ (C, "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors", "loras"),
 ]
 for repo, path, sub in items:
     dst = os.path.join(M, sub, os.path.basename(path))

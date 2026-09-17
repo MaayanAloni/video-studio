@@ -1,5 +1,6 @@
 """Video Studio server: REST API + static GUI. Supervises the local ComfyUI engine."""
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -28,18 +29,33 @@ async def _not_found(request, exc):
     return JSONResponse({"error": "not found"}, status_code=404)
 
 
+_unhealthy = 0
+
+
 def ensure_engine():
     """Start ComfyUI if it is not running; called at boot and by a watchdog."""
-    global _engine_proc
+    global _engine_proc, _unhealthy
     if comfy.alive():
+        _unhealthy = 0
         return
     if _engine_proc and _engine_proc.poll() is None:
         return  # still booting
+    if comfy.port_busy():
+        # Something IS listening, it is just too busy to answer (heavy sampling, swapping).
+        # Never spawn a duplicate over a live port; only give up after a long stall.
+        _unhealthy += 1
+        if _unhealthy < 30:  # ~5 minutes at the 10s watchdog interval
+            return
+        print("engine unresponsive for ~5 min but port is held; not spawning a duplicate")
+        _unhealthy = 0
+        return
+    _unhealthy = 0
     os.makedirs(os.path.join(ROOT, "logs"), exist_ok=True)
     env = dict(os.environ, PYTORCH_ENABLE_MPS_FALLBACK="1", PYTORCH_MPS_HIGH_WATERMARK_RATIO="0.0")
     log = open(os.path.join(ROOT, "logs", "engine.log"), "a")
     _engine_proc = subprocess.Popen(
-        [sys.executable, "main.py", "--port", "8188", "--listen", "127.0.0.1", "--disable-auto-launch"],
+        [sys.executable, "main.py", "--port", "8188", "--listen", "127.0.0.1", "--disable-auto-launch",
+         "--preview-method", "auto", "--preview-size", "512"],
         cwd=os.path.join(ROOT, "engine"), env=env, stdout=log, stderr=subprocess.STDOUT)
 
 
@@ -60,16 +76,21 @@ def _startup():
 
 def model_status():
     base = os.path.join(ROOT, "engine", "models")
+    m14 = wf.MODELS["14b"]
+    g = lambda stem: wf.pick_gguf(stem, "max")  # stems resolve to whichever quant is on disk
     need = {
         "text": ("text_encoders", wf.TEXT_ENCODER),
         "5b": ("diffusion_models", wf.MODELS["5b"]["unet"]), "5b_vae": ("vae", wf.MODELS["5b"]["vae"]),
-        "14b_high": ("diffusion_models", wf.MODELS["14b"]["high"]), "14b_low": ("diffusion_models", wf.MODELS["14b"]["low"]),
-        "14b_vae": ("vae", wf.MODELS["14b"]["vae"]),
-        "lora_high": ("loras", wf.MODELS["14b"]["lora_high"]), "lora_low": ("loras", wf.MODELS["14b"]["lora_low"]),
+        "14b_high": ("diffusion_models", g(m14["high"])), "14b_low": ("diffusion_models", g(m14["low"])),
+        "14b_vae": ("vae", m14["vae"]),
+        "lora_high": ("loras", m14["lora_high"]), "lora_low": ("loras", m14["lora_low"]),
+        "t2v_high": ("diffusion_models", g(m14["t2v_high"])), "t2v_low": ("diffusion_models", g(m14["t2v_low"])),
+        "t2v_lora_high": ("loras", m14["t2v_lora_high"]), "t2v_lora_low": ("loras", m14["t2v_lora_low"]),
     }
     have = {k: os.path.exists(os.path.join(base, *v)) for k, v in need.items()}
     return {"draft": have["text"] and have["5b"] and have["5b_vae"],
             "hq": all(have[k] for k in ("text", "14b_high", "14b_low", "14b_vae", "lora_high", "lora_low")),
+            "t2v_hq": jobs.t2v14_ready(),
             "files": have}
 
 
@@ -116,6 +137,31 @@ def frame_as_upload(vid: str, n: int):
     return {"name": name, "url": f"/uploads/{name}"}
 
 
+LOG_FILES = {"engine": "engine.log", "server": "server.log", "downloads": "download2.log"}
+_ANSI = re.compile(r"\x1B\[[0-9;]*[mGKHF]")
+
+
+@app.get("/api/logs/{name}")
+def logs(name: str, lines: int = 200):
+    """Tail a log file, collapsing tqdm carriage-returns so progress bars read cleanly."""
+    fn = LOG_FILES.get(name)
+    if not fn:
+        raise HTTPException(404, "unknown log")
+    path = os.path.join(ROOT, "logs", fn)
+    if not os.path.exists(path):
+        return {"name": name, "text": "(no log yet)", "size": 0}
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        f.seek(max(0, size - 400_000))
+        raw = f.read().decode("utf-8", "replace")
+    out = []
+    for ln in raw.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        ln = _ANSI.sub("", ln).rstrip()
+        if ln.strip():
+            out.append(ln)
+    return {"name": name, "text": "\n".join(out[-max(10, min(lines, 2000)):]), "size": size}
+
+
 @app.get("/api/jobs")
 def get_jobs():
     return jobs.all_jobs()
@@ -127,6 +173,14 @@ def post_job(body: dict):
         return jobs.submit(body.get("type", ""), body.get("params") or {})
     except (ValueError, KeyError, TypeError) as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/api/jobs/{jid}/preview")
+def job_preview(jid: str):
+    p = os.path.join(jobs.PREVIEW_DIR, os.path.basename(jid) + ".jpg")
+    if not os.path.exists(p):
+        raise HTTPException(404)
+    return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/jobs/{jid}/cancel")

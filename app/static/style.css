@@ -94,3 +94,12 @@ details{margin-top:14px}summary{cursor:pointer;color:var(--muted)}
 .chk{color:var(--muted);font-size:13px;display:flex;gap:6px;align-items:center}
 dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:20px}
 dialog::backdrop{background:#000a}
+.logbox{background:#0a0c11;border:1px solid var(--line);border-radius:12px;padding:14px;margin:0;
+  font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c9d1e0;white-space:pre-wrap;word-break:break-word;
+  height:calc(100vh - 190px);overflow:auto}
+.logbox .err{color:var(--err)}
+code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12px}
+.warnflag{background:#ffb84d22;color:var(--warn);border:1px solid #ffb84d55;border-radius:6px;padding:1px 7px;font-size:11px;cursor:help}
+.prevwrap{margin-top:10px}
+.jobprev{width:100%;max-height:46vh;object-fit:contain;border-radius:8px;background:#000;display:block}
+.prevcap{color:var(--muted);font-size:11px;margin-top:4px;text-align:center}

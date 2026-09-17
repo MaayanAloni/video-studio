@@ -19,11 +19,21 @@ class EngineError(Exception):
     pass
 
 
-def alive() -> bool:
+def alive(timeout: int = 12) -> bool:
+    """Health check. Generous timeout: a saturated engine answers slowly, and treating
+    that as 'dead' used to make the watchdog spawn a duplicate process."""
     try:
-        return requests.get(ENGINE + "/system_stats", timeout=3).ok
+        return requests.get(ENGINE + "/system_stats", timeout=timeout).ok
     except requests.RequestException:
         return False
+
+
+def port_busy(port: int = 8188) -> bool:
+    """Is something listening on the engine port at all?"""
+    import socket
+    with socket.socket() as s:
+        s.settimeout(1)
+        return s.connect_ex(("127.0.0.1", port)) == 0
 
 
 def upload_image(path: str) -> str:
@@ -48,7 +58,18 @@ def free_memory():
         pass
 
 
-def run(graph: dict, on_progress=None, cancelled=lambda: False, timeout=6 * 3600) -> list[str]:
+def _extract_image(buf: bytes):
+    """ComfyUI preview frames arrive as binary ws messages: 4-byte event id, 4-byte
+    image format, then the image. Scanning for the magic bytes instead of assuming
+    fixed offsets keeps this working across the several header layouts it uses."""
+    for magic in (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n"):
+        i = buf.find(magic, 0, 1024)
+        if i >= 0:
+            return buf[i:]
+    return None
+
+
+def run(graph: dict, on_progress=None, cancelled=lambda: False, timeout=6 * 3600, on_preview=None) -> list[str]:
     """Queue a graph, block until done, return absolute paths of saved images (sorted)."""
     cid = uuid.uuid4().hex
     ws = websocket.WebSocket()
@@ -79,6 +100,10 @@ def run(graph: dict, on_progress=None, cancelled=lambda: False, timeout=6 * 3600
                     raise EngineError(_err(h[pid]))
                 continue
             if not isinstance(msg, str):
+                if on_preview:                       # live latent preview during sampling
+                    img = _extract_image(msg)
+                    if img:
+                        on_preview(img)
                 continue
             m = json.loads(msg)
             d = m.get("data", {})

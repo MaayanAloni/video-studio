@@ -52,6 +52,30 @@ def list_videos() -> list[dict]:
     return sorted(out, key=lambda m: -m["created"])
 
 
+def health(frame_paths: list[str]) -> dict:
+    """Detect silent MPS output corruption (ComfyUI issue #15793): on some Apple Silicon
+    chips Wan output degrades progressively along the clip with no error raised. Real
+    symptom is a large MONOTONIC saturation climb; ordinary scene change is small and
+    non-monotonic. Sampled, so this costs little."""
+    import numpy as np
+    from PIL import Image
+    n = len(frame_paths)
+    if n < 8:
+        return {"drift": 0.0, "suspect": False}
+    idx = [round(i * (n - 1) / 11) for i in range(12)]
+    sat = []
+    for i in idx:
+        with Image.open(frame_paths[i]) as im:
+            a = np.asarray(im.convert("RGB"), np.float32)
+        mx, mn = a.max(2), a.min(2)
+        sat.append(float(np.where(mx > 0, (mx - mn) / np.maximum(mx, 1), 0).mean()) * 100)
+    drift = (sat[-1] - sat[0]) / max(sat[0], 1e-6) * 100
+    diffs = np.diff(sat)
+    monotonic = float((diffs > 0).mean())          # 1.0 == climbs every single step
+    return {"drift": round(drift, 1), "monotonic": round(monotonic, 2),
+            "suspect": bool(drift > 25 and monotonic > 0.8)}
+
+
 def create_video(frame_paths: list[str], fps: float, info: dict) -> dict:
     """Copy frames into a new video entry, encode mp4 + thumbnail, return meta."""
     from PIL import Image
@@ -68,7 +92,7 @@ def create_video(frame_paths: list[str], fps: float, info: dict) -> dict:
     encode(vid, fps)
     Image.open(frame_paths[0]).convert("RGB").resize((320, max(2, int(320 * h / w)))).save(os.path.join(d, "thumb.jpg"), quality=85)
     m = {"id": vid, "created": time.time(), "fps": fps, "width": w, "height": h, "frames": len(frame_paths),
-         "seconds": round(len(frame_paths) / fps, 3), **info}
+         "seconds": round(len(frame_paths) / fps, 3), "health": health(frame_paths), **info}
     m.setdefault("name", (info.get("prompt") or "video")[:60])
     save_meta(m)
     return m
