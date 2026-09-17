@@ -11,7 +11,7 @@ const api = async (path, opt = {}) => {
 };
 const fmtT = s => s == null ? '' : s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
 
-const S = { mode: 't2v', quality: 'standard', images: {}, status: null, jobs: [], videos: [], cur: null, sel: null, loop: false, seenDone: new Set(), firstPoll: true };
+const S = { compute: 'local', mode: 't2v', quality: 'standard', images: {}, status: null, jobs: [], videos: [], cur: null, sel: null, loop: false, seenDone: new Set(), firstPoll: true };
 
 /* ------------------------------------------------------------ navigation */
 function show(view) {
@@ -20,6 +20,7 @@ function show(view) {
   if (view !== 'editor') $('#vid').pause();
   if (view === 'library') renderLibrary();
   if (view === 'logs') refreshLogs(true);
+  if (view === 'settings') loadSettings();
 }
 $$('.navbtn').forEach(b => b.onclick = () => show(b.dataset.view));
 
@@ -35,6 +36,11 @@ function setMode(m) {
   syncDrops(); updateHints();
 }
 $$('#modeTabs .tab').forEach(t => t.onclick = () => setMode(t.dataset.mode));
+$$('#computeTabs .tab').forEach(t => t.onclick = () => {
+  S.compute = t.dataset.compute;
+  $$('#computeTabs .tab').forEach(x => x.classList.toggle('active', x === t));
+  updateHints();
+});
 $$('#qualityCards .card').forEach(c => c.onclick = () => { S.quality = c.dataset.q; $$('#qualityCards .card').forEach(x => x.classList.toggle('active', x === c)); updateHints(); });
 
 function addShot(data = {}) {
@@ -71,6 +77,11 @@ function updateHints() {
   $$('#qualityCards .card').forEach(c => {
     const e = estimate(c.dataset.q, s, $('#resolution').value);
     $('i', c).textContent = e ? '≈ ' + fmtT(e) : '';
+    if (c.dataset.q === 'ultra') {           // unquantised weights: rented GPU only
+      c.hidden = !(S.status?.remote?.enabled);
+      c.classList.toggle('off', S.compute !== 'remote');
+      return;
+    }
     const hq = c.dataset.q !== 'draft';
     c.classList.toggle('off', S.status ? !(hq ? S.status.models.hq : S.status.models.draft) : false);
   });
@@ -113,6 +124,7 @@ $('#generate').onclick = async () => {
     quality: S.quality, aspect: $('#aspect').value, resolution: $('#resolution').value, camera: $('#camera').value,
     negative: $('#negative').value.trim() || null, style: $('#style').value.trim(), name: $('#name').value.trim() || null,
     seed: $('#seed').value === '' ? null : +$('#seed').value, variations: +$('#variations').value || 1,
+    compute: S.compute,
     cfg: +$('#cfg').value > 1 ? +$('#cfg').value : null,
   };
   if (S.mode === 'story') {
@@ -130,7 +142,7 @@ $('#generate').onclick = async () => {
 function jobHTML(j) {
   const pct = Math.round((j.progress || 0) * 100);
   const run = j.status === 'running';
-  return `<div class="job"><div class="top"><b>${esc(j.type.replace('_', ' '))}</b><span class="st ${j.status}">${j.status}</span>
+  return `<div class="job"><div class="top"><b>${esc(j.type.replace('_', ' '))}</b><span class="st ${j.status}">${j.status}</span>${j.params.compute === 'remote' ? '<span class="st remote">☁ rented GPU</span>' : ''}
     <span class="muted">${run ? esc(j.stage) + ` · ${pct}%` + (j.eta ? ` · ~${fmtT(j.eta)} left` : '') : new Date(j.created * 1000).toLocaleString()}</span><span class="spacer"></span>
     ${j.video ? `<button data-open="${j.video}">Open</button>` : ''}
     ${run || j.status === 'queued' ? `<button data-cancel="${j.id}">Cancel</button>` : `<button data-del="${j.id}">✕</button>`}</div>
@@ -202,6 +214,16 @@ async function pollStatus() {
       <div><span class="dot ${m.draft ? 'ok' : ''}"></span>5B draft model</div><div><span class="dot ${m.hq ? 'ok' : ''}"></span>14B image&rarr;video</div>
       <div><span class="dot ${m.t2v_hq ? 'ok' : ''}"></span>14B text&rarr;video</div>
       <div>${S.status.disk_free_gb} GB free</div>`;
+    const rm = S.status.remote || {};
+    $('#computeRow').hidden = !rm.enabled;
+    $('#edComputeWrap').hidden = !rm.enabled;
+    $('#computeLabel').textContent = rm.label ? `· ${rm.label}` : '';
+    if (!rm.enabled && S.compute === 'remote') { S.compute = 'local'; $$('#computeTabs .tab').forEach(x => x.classList.toggle('active', x.dataset.compute === 'local')); }
+    if (rm.enabled && rm.default_for_new && !S.computeTouched) {
+      S.computeTouched = true; S.compute = 'remote';
+      $$('#computeTabs .tab').forEach(x => x.classList.toggle('active', x.dataset.compute === 'remote'));
+      $('#edCompute').value = 'remote';
+    }
     updateHints();
   } catch { /* poll() reports offline */ }
 }
@@ -322,7 +344,7 @@ document.addEventListener('keydown', e => {
 
 async function edJob(type, params) {
   $('#edErr').textContent = '';
-  try { await api('/api/jobs', { method: 'POST', body: { type, params: { video: S.cur.id, ...params } } }); lastJobsKey = ''; poll(); }
+  try { await api('/api/jobs', { method: 'POST', body: { type, params: { video: S.cur.id, compute: $('#edCompute').value, ...params } } }); lastJobsKey = ''; poll(); }
   catch (e) { $('#edErr').textContent = e.message; }
 }
 $('#btnRegen').onclick = () => {
@@ -379,6 +401,37 @@ async function refreshLogs(force) {
 $('#logPick').onchange = () => refreshLogs(true);
 $('#logCopy').onclick = () => navigator.clipboard.writeText($('#logBox').textContent);
 setInterval(() => refreshLogs(false), 2000);
+
+/* ------------------------------------------------------------ settings */
+async function loadSettings() {
+  const s = await api('/api/settings');
+  const r = s.remote || {};
+  $('#rEnabled').checked = !!r.enabled; $('#rUrl').value = r.url || '';
+  $('#rToken').value = r.token || ''; $('#rLabel').value = r.label || '';
+  $('#rDefault').checked = !!r.default_for_new;
+}
+$('#rSave').onclick = async () => {
+  $('#rResult').textContent = 'saving…';
+  try {
+    await api('/api/settings', { method: 'PUT', body: { remote: {
+      enabled: $('#rEnabled').checked, url: $('#rUrl').value.trim(), token: $('#rToken').value.trim(),
+      label: $('#rLabel').value.trim(), default_for_new: $('#rDefault').checked } } });
+    $('#rResult').textContent = 'saved.';
+    await pollStatus();
+  } catch (e) { $('#rResult').innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`; }
+};
+$('#rTest').onclick = async () => {
+  $('#rResult').textContent = 'connecting…';
+  try {
+    const r = await api('/api/remote/test', { method: 'POST', body: { url: $('#rUrl').value.trim(), token: $('#rToken').value.trim() } });
+    if (!r.ok) { $('#rResult').innerHTML = `<span style="color:var(--err)">${esc(r.error)}</span>`; return; }
+    const m = r.models || {};
+    $('#rResult').innerHTML = `<span style="color:var(--acc2)">connected</span> — ${esc(r.device || '?')} ·
+      ${r.vram_gb} GB VRAM · ComfyUI ${esc(r.comfyui || '?')} · ${r.latency_ms} ms<br>
+      models present: Wan image→video ${m.wan_i2v ? '✓' : '✗'} · Wan text→video ${m.wan_t2v ? '✓' : '✗'} ·
+      ${m.count} diffusion files`;
+  } catch (e) { $('#rResult').innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`; }
+};
 
 /* ------------------------------------------------------------ boot */
 (async function boot() {

@@ -14,6 +14,7 @@
   <button class="navbtn" data-view="library">▦ Library</button>
   <button class="navbtn" data-view="queue">≡ Queue <span id="queueBadge" class="badge" hidden></span></button>
   <button class="navbtn" data-view="logs">▤ Logs</button>
+  <button class="navbtn" data-view="settings">⚙ Settings</button>
   <div class="spacer"></div>
   <div id="sys" class="sys"></div>
 </aside>
@@ -50,12 +51,21 @@
         </div>
       </div>
 
+      <div id="computeRow" hidden>
+        <label>Render on</label>
+        <div class="tabs" id="computeTabs">
+          <button class="tab active" data-compute="local">This Mac</button>
+          <button class="tab" data-compute="remote">Rented GPU <span id="computeLabel"></span></button>
+        </div>
+      </div>
+
       <label>Quality</label>
       <div class="cards" id="qualityCards">
         <div class="card" data-q="draft"><b>Draft</b><small>5B · fastest · 24fps</small><i></i></div>
         <div class="card active" data-q="standard"><b>Standard</b><small>14B · 4 steps</small><i></i></div>
         <div class="card" data-q="pro"><b>Pro</b><small>14B · 8 steps</small><i></i></div>
         <div class="card" data-q="master"><b>Master</b><small>14B · 20 steps, full CFG</small><i></i></div>
+        <div class="card" data-q="ultra" hidden><b>Ultra</b><small>14B unquantised · 30 steps · rented GPU only</small><i></i></div>
       </div>
 
       <div class="row3">
@@ -135,6 +145,7 @@
         <div class="row2">
           <div><label>Quality</label><select id="edQuality"><option value="standard">Standard</option><option value="pro">Pro</option><option value="master">Master</option></select></div>
           <div><label>Seed</label><input type="number" id="edSeed" placeholder="random"></div>
+          <div id="edComputeWrap" hidden><label>Render on</label><select id="edCompute"><option value="local">This Mac</option><option value="remote">Rented GPU</option></select></div>
         </div>
         <button class="primary" id="btnRegen" disabled>Regenerate range</button>
 
@@ -196,6 +207,37 @@
   </div>
   <pre id="logBox" class="logbox">loading…</pre>
   <div class="hint">Terminal equivalent: <code>~/video-studio/logs.sh engine</code> &nbsp;·&nbsp; raw files live in <code>~/video-studio/logs/</code></div>
+</section>
+
+<!-- ============================ SETTINGS ============================ -->
+<section id="view-settings" class="view">
+  <div class="titlebar"><h2>Settings</h2></div>
+  <div class="panel form" style="max-width:680px">
+    <h3 style="margin-top:0">Rented GPU <small class="muted">— optional</small></h3>
+    <div class="hint">Everything stays on this Mac unless you switch a job to the rented GPU. Off by default.
+      Prompts, reference images and rendered frames are sent to whatever machine you point this at.</div>
+
+    <label class="chk" style="margin-top:14px"><input type="checkbox" id="rEnabled"> Enable rented GPU</label>
+
+    <label>Engine URL</label>
+    <input type="text" id="rUrl" placeholder="http://127.0.0.1:8189   (SSH tunnel — recommended)">
+    <div class="hint">With an SSH tunnel this is a local address and the traffic is encrypted. A
+      <code>https://…proxy.runpod.net</code> URL also works but is reachable by anyone who learns it.</div>
+
+    <label>Token <small>(only if the pod runs an auth proxy)</small></label>
+    <input type="text" id="rToken" placeholder="optional">
+
+    <label>Label</label>
+    <input type="text" id="rLabel" placeholder="e.g. RunPod H100 · Canada">
+
+    <label class="chk"><input type="checkbox" id="rDefault"> Use the rented GPU by default for new jobs</label>
+
+    <div class="row2" style="margin-top:16px">
+      <button id="rTest">Test connection</button>
+      <button class="primary" id="rSave" style="margin-top:0">Save</button>
+    </div>
+    <div id="rResult" class="hint"></div>
+  </div>
 </section>
 
 <dialog id="pick"><h3>Append which clip?</h3><div id="pickGrid" class="grid small"></div><button class="ghost" onclick="pick.close()">Cancel</button></dialog>

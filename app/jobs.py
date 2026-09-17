@@ -11,6 +11,7 @@ import uuid
 
 import comfy
 import media
+import settings
 import workflows as wf
 
 JOBS_FILE = os.path.join(media.DATA, "jobs.json")
@@ -116,11 +117,15 @@ def remove(jid):
 # ---------------------------------------------------------------- validation
 
 def validate(jtype, p):
+    if p.get("compute") == "remote":
+        settings.engine_for("remote")   # raises if not configured/enabled
     if jtype == "generate":
         if not (p.get("prompt") or "").strip() and not p.get("segments"):
             raise ValueError("prompt is required")
         if p.get("quality", "standard") not in wf.QUALITY:
             raise ValueError("unknown quality")
+        if p.get("quality") in wf.REMOTE_ONLY and p.get("compute") != "remote":
+            raise ValueError(f"{p['quality'].title()} quality needs the rented GPU (~40 GB VRAM)")
         if p.get("end_image") and wf.QUALITY[p.get("quality", "standard")]["model"] != "14b":
             raise ValueError("an end frame needs Standard/Pro/Master quality (14B model)")
         for k in ("start_image", "end_image"):
@@ -131,7 +136,7 @@ def validate(jtype, p):
             w, h = dims(p.get("aspect", "16:9"), p.get("resolution", "480p"), 16)
             secs = min(float(p.get("seconds") or 5), MAX_SECONDS)
             cfg = p.get("cfg") or wf.QUALITY[qn]["cfg"]
-            check_fits(w, h, wf.snap_len(round(secs * 16)), cfg, qn, p.get("force"))
+            check_fits(w, h, wf.snap_len(round(secs * 16)), cfg, qn, p.get("force"), p.get("compute"))
     elif jtype in ("extend", "edit_range", "interpolate", "upscale", "trim", "join", "reverse"):
         if not os.path.exists(media.vdir(p.get("video", "?"))):
             raise ValueError("video not found")
@@ -159,9 +164,9 @@ def mem_cost(w, h, frames, cfg, expert_gb=9.65):
     return w * h * frames * (2 if cfg and cfg > 1.05 else 1) * expert_gb
 
 
-def check_fits(w, h, frames, cfg, quality, force=False):
-    """Refuse configurations that will page-thrash instead of computing."""
-    if force or wf.QUALITY[quality]["model"] != "14b":
+def check_fits(w, h, frames, cfg, quality, force=False, compute="local"):
+    """Refuse configurations that will page-thrash instead of computing (local Mac only)."""
+    if force or compute == "remote" or wf.QUALITY[quality]["model"] != "14b":
         return
     mode = wf.QUALITY[quality].get("quant", "fast")
     cost = mem_cost(w, h, frames, cfg, wf.expert_gb(wf.MODELS["14b"]["high"], mode))
@@ -208,6 +213,13 @@ def full_prompt(prompt, camera, style=""):
 class Ctx:
     def __init__(self, job, total_clips):
         self.job, self.total, self.done = job, max(1, total_clips), 0
+        self.engine = settings.engine_for(job["params"].get("compute"))
+        self.available = self.available_clip = None
+        if not self.engine.local:   # remote box has its own model set
+            self.available = self.engine.unet_options()
+            self.available_clip = self.engine.clip_options()
+            if not self.available:
+                raise comfy.EngineError("remote engine reported no loadable models")
         self.tmp = tempfile.mkdtemp(prefix="vs_", dir=media.DATA)
         self.t_clip = None
 
@@ -239,35 +251,32 @@ class Ctx:
 def render_clip(ctx: Ctx, clip: dict, label: str) -> list[str]:
     """Render one model pass, return frame paths inside ctx.tmp."""
     ctx.stage(label)
-    clip = dict(clip, prefix=f"vs/{ctx.job['id']}_{ctx.done:03d}")
+    clip = dict(clip, prefix=f"vs/{ctx.job['id']}_{ctx.done:03d}", available=ctx.available,
+                available_clip=ctx.available_clip)
+    eng = ctx.engine
     for k in ("start_image", "end_image"):
         if clip.get(k):
-            clip[k] = comfy.upload_image(clip[k])
+            clip[k] = eng.upload_image(clip[k])
+    dst = os.path.join(ctx.tmp, f"clip{ctx.done:03d}")
     ctx.t_clip = time.time()
     try:
-        files = comfy.run(wf.build(clip), ctx.progress, ctx.cancelled, on_preview=ctx.preview)
+        out = eng.run(wf.build(clip), dst, ctx.progress, ctx.cancelled, on_preview=ctx.preview)
     except (comfy.Cancelled, comfy.EngineError):
         raise
-    except Exception as e:  # noqa: BLE001 - connection dropped: the engine died (usually out of memory)
+    except Exception as e:  # noqa: BLE001 - connection dropped: engine died (usually out of memory)
         if ctx.cancelled():
             raise comfy.Cancelled()
-        ctx.stage("engine crashed - waiting for restart, will retry once")
+        ctx.stage("engine unreachable - waiting, will retry once")
         for _ in range(90):
-            if comfy.alive():
+            if eng.alive():
                 break
             time.sleep(2)
         else:
-            raise comfy.EngineError(f"engine crashed and did not come back ({e})")
+            raise comfy.EngineError(f"engine went away and did not come back ({e})")
         ctx.stage(label + " (retry)")
         ctx.t_clip = time.time()
-        files = comfy.run(wf.build(clip), ctx.progress, ctx.cancelled, on_preview=ctx.preview)
-    dst = os.path.join(ctx.tmp, f"clip{ctx.done:03d}")
-    os.makedirs(dst)
-    out = []
-    for i, f in enumerate(files):
-        p = os.path.join(dst, f"{i:06d}.png")
-        shutil.move(f, p)
-        out.append(p)
+        shutil.rmtree(dst, ignore_errors=True)
+        out = eng.run(wf.build(clip), dst, ctx.progress, ctx.cancelled, on_preview=ctx.preview)
     perf = _perf()
     perf[clip["quality"]] = {"sec": time.time() - ctx.t_clip, "frames": len(out), "px": clip["width"] * clip["height"]}
     with open(PERF_FILE, "w") as f:

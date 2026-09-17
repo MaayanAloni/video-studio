@@ -16,6 +16,7 @@ from PIL import Image  # noqa: E402
 
 import comfy  # noqa: E402
 import jobs  # noqa: E402
+import settings as settings_mod  # noqa: E402
 import media  # noqa: E402
 import workflows as wf  # noqa: E402
 
@@ -97,10 +98,65 @@ def model_status():
 @app.get("/api/status")
 def status():
     free = os.statvfs(ROOT)
+    st = settings_mod.load()["remote"]
     return {"engine": comfy.alive(), "models": model_status(), "perf": jobs._perf(),
+            "remote": {"enabled": bool(st.get("enabled") and st.get("url")), "label": st.get("label", ""),
+                       "default_for_new": bool(st.get("default_for_new"))},
             "disk_free_gb": round(free.f_bavail * free.f_frsize / 1e9, 1),
             "cameras": list(jobs.CAMERA), "aspects": list(jobs.ASPECTS), "resolutions": list(jobs.RES_PIXELS),
             "quality": {k: {"model": v["model"], "steps": v["steps"], "fps": wf.MODELS[v["model"]]["fps"]} for k, v in wf.QUALITY.items()}}
+
+
+@app.get("/api/settings")
+def get_settings():
+    return settings_mod.public()
+
+
+@app.put("/api/settings")
+def put_settings(body: dict):
+    r = dict(body.get("remote") or {})
+    if r.get("token") == "********":      # unchanged placeholder from the UI
+        r.pop("token")
+    if r.get("url"):
+        u = str(r["url"]).strip().rstrip("/")
+        if not u.startswith(("http://", "https://")):
+            u = "http://" + u
+        r["url"] = u
+    return settings_mod.public(settings_mod.save({"remote": r}))
+
+
+@app.post("/api/remote/test")
+def remote_test(body: dict = None):
+    """Check a remote GPU: reachable, what card, which of our models it already has."""
+    body = body or {}
+    cfg = settings_mod.load()["remote"]
+    url = (body.get("url") or cfg.get("url") or "").strip().rstrip("/")
+    token = body.get("token")
+    if token == "********" or token is None:
+        token = cfg.get("token", "")
+    if not url:
+        return {"ok": False, "error": "no URL set"}
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
+    eng = comfy.Engine(url, token, local=False, name="remote")
+    t0 = time.time()
+    try:
+        st = eng.stats()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"cannot reach engine: {str(e)[:300]}"}
+    dev = (st.get("devices") or [{}])[0]
+    unets = eng.unet_options()
+    m14 = wf.MODELS["14b"]
+    have_wan = any(n.startswith(m14["high"]) for n in unets) and any(n.startswith(m14["low"]) for n in unets)
+    have_wan_t2v = any(n.startswith(m14["t2v_high"]) for n in unets) and any(n.startswith(m14["t2v_low"]) for n in unets)
+    have_full = m14["high_full"] in unets and m14["low_full"] in unets
+    have_full_t2v = m14["t2v_high_full"] in unets and m14["t2v_low_full"] in unets
+    return {"ok": True, "latency_ms": int((time.time() - t0) * 1000),
+            "comfyui": st.get("system", {}).get("comfyui_version"),
+            "device": dev.get("name"), "vram_gb": round(dev.get("vram_total", 0) / 1e9, 1),
+            "models": {"wan_i2v": have_wan, "wan_t2v": have_wan_t2v, "count": len(unets),
+                       "ultra": have_full, "ultra_t2v": have_full_t2v},
+            "unets": sorted(unets)[:40]}
 
 
 @app.post("/api/upload")

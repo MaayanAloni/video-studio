@@ -35,6 +35,12 @@ MODELS = {
         "t2v_low": "Wan2.2-T2V-A14B-LowNoise",
         "t2v_lora_high": "wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors",
         "t2v_lora_low": "wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors",
+        # unquantised weights — ~28.6 GB per expert, only viable on a big rented card
+        "high_full": "wan2.2_i2v_high_noise_14B_fp16.safetensors",
+        "low_full": "wan2.2_i2v_low_noise_14B_fp16.safetensors",
+        "t2v_high_full": "wan2.2_t2v_high_noise_14B_fp16.safetensors",
+        "t2v_low_full": "wan2.2_t2v_low_noise_14B_fp16.safetensors",
+        "clip_full": "umt5_xxl_fp16.safetensors",
     },
 }
 TEXT_ENCODER = "umt5-xxl-encoder-Q8_0.gguf"
@@ -45,12 +51,13 @@ QUANT_ORDER = ["Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M"]
 _MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "engine", "models", "diffusion_models")
 
 
-def pick_gguf(stem: str, mode: str = "max") -> str:
-    """stem e.g. 'Wan2.2-I2V-A14B-HighNoise' -> best available '<stem>-Q8_0.gguf'."""
+def pick_gguf(stem: str, mode: str = "max", available: set = None) -> str:
+    """stem e.g. 'Wan2.2-I2V-A14B-HighNoise' -> best available '<stem>-Q8_0.gguf'.
+    `available` is the engine's own file list (remote GPU); None means look on local disk."""
     order = QUANT_ORDER if mode == "max" else list(reversed(QUANT_ORDER))
     for q in order:
         name = f"{stem}-{q}.gguf"
-        if os.path.exists(os.path.join(_MODEL_DIR, name)):
+        if (name in available) if available is not None else os.path.exists(os.path.join(_MODEL_DIR, name)):
             return name
     return f"{stem}-Q4_K_M.gguf"
 
@@ -70,7 +77,10 @@ QUALITY = {
     "standard": {"model": "14b", "steps": 4,  "cfg": 1.0, "fast": True},
     "pro":      {"model": "14b", "steps": 8,  "cfg": 1.0, "fast": True},
     "master":   {"model": "14b", "steps": 20, "cfg": 3.5, "fast": False, "quant": "max"},
+    # remote only: unquantised weights, more steps. Needs ~40 GB VRAM.
+    "ultra":    {"model": "14b", "steps": 30, "cfg": 4.0, "fast": False, "quant": "max", "full": True},
 }
+REMOTE_ONLY = {"ultra"}
 
 
 def snap_len(frames: int) -> int:
@@ -97,7 +107,11 @@ def build(clip: dict) -> dict:
     n = snap_len(clip["frames"])
     seed = int(clip["seed"])
     g = {}
-    g["clip"] = {"class_type": "CLIPLoaderGGUF", "inputs": {"clip_name": TEXT_ENCODER, "type": "wan"}}
+    full = bool(q.get("full")) and clip.get("available") is not None and m.get("clip_full") in (clip.get("available_clip") or set())
+    if full:
+        g["clip"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": m["clip_full"], "type": "wan"}}
+    else:
+        g["clip"] = {"class_type": "CLIPLoaderGGUF", "inputs": {"clip_name": TEXT_ENCODER, "type": "wan"}}
     g["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": clip["prompt"]}}
     g["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["clip", 0], "text": clip.get("negative") or NEG_DEFAULT}}
     g["vae"] = {"class_type": "VAELoader", "inputs": {"vae_name": m["vae"]}}
@@ -137,7 +151,12 @@ def build(clip: dict) -> dict:
             g["fl"] = {"class_type": "WanFirstLastFrameToVideo", "inputs": fl}
             cond_pos, cond_neg, latent = ["fl", 0], ["fl", 1], ["fl", 2]
         for k in ("high", "low"):
-            g["u_" + k] = {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": pick_gguf(m[pre + k], clip.get("quant") or q.get("quant", "fast"))}}
+            fullname = m.get(pre + k + "_full")
+            if full and fullname in (clip.get("available") or set()):
+                g["u_" + k] = {"class_type": "UNETLoader", "inputs": {"unet_name": fullname, "weight_dtype": "default"}}
+            else:
+                g["u_" + k] = {"class_type": "UnetLoaderGGUF", "inputs": {
+                    "unet_name": pick_gguf(m[pre + k], clip.get("quant") or q.get("quant", "fast"), clip.get("available"))}}
             src = ["u_" + k, 0]
             if q.get("fast"):
                 g["l_" + k] = {"class_type": "LoraLoaderModelOnly", "inputs": {
