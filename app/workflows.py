@@ -51,7 +51,19 @@ TEXT_ENCODER = "umt5-xxl-encoder-Q8_0.gguf"
 H3 = {
     "fps": 24,
     "grid": 32,
-    "unet": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    # best first; which one exists depends on the pod's CUDA version
+    "unets": ["minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+              "minimax_h3_fl2va_pruned_fp8_scaled.safetensors",
+              "minimax_h3_fl2va_pruned_bf16.safetensors",
+              "minimax_h3_fl2va_int8_convrot.safetensors",
+              "minimax_h3_fl2va_bf16.safetensors"],
+    # reference-to-video is a SEPARATE checkpoint from the first/last-frame one
+    "ref_unets": ["minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+                  "minimax_h3_ref2va_pruned_fp8_scaled.safetensors",
+                  "minimax_h3_ref2va_pruned_bf16.safetensors",
+                  "minimax_h3_ref2va_int8_convrot.safetensors",
+                  "minimax_h3_ref2va_bf16.safetensors"],
+    "max_refs": 9,
     "clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
     "vae_video": "minimax_h3_video_vae_fp16.safetensors",
     "vae_audio": "minimax_h3_audio_vae_fp32.safetensors",
@@ -118,6 +130,26 @@ def snap_dim(v: int, grid: int) -> int:
     return max(grid * 4, int(round(v / grid)) * grid)
 
 
+def pick_h3_unet(available: set = None, refs: bool = False) -> str:
+    names = H3["ref_unets"] if refs else H3["unets"]
+    for n in names:
+        if available is None or n in available:
+            return n
+    return names[1]              # fp8_scaled: the CUDA-12 fallback
+
+
+def h3_refs_ready(available: set) -> bool:
+    return any(n in (available or set()) for n in H3["ref_unets"])
+
+
+def tag_refs(prompt: str, n: int) -> str:
+    """H3 addresses references as <Picture 1>..<Picture n>. If the prompt doesn't
+    mention them, prepend the tags so the references actually get used."""
+    if n <= 0 or "<Picture" in prompt:
+        return prompt
+    return " ".join(f"<Picture {i}>" for i in range(1, n + 1)) + " " + prompt
+
+
 def build_h3(clip: dict) -> dict:
     """MiniMax H3 graph: text/image -> video WITH synchronised audio.
 
@@ -132,7 +164,9 @@ def build_h3(clip: dict) -> dict:
         "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": H3["clip"], "type": "minimax"}},
         "vae_v": {"class_type": "VAELoader", "inputs": {"vae_name": H3["vae_video"]}},
         "vae_a": {"class_type": "VAELoader", "inputs": {"vae_name": H3["vae_audio"]}},
-        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": H3["unet"], "weight_dtype": "default"}},
+        "unet": {"class_type": "UNETLoader", "inputs": {
+            "unet_name": pick_h3_unet(clip.get("available"), bool(clip.get("ref_images"))),
+            "weight_dtype": "default"}},
     }
     model = ["unet", 0]
     if q.get("lora") and q["lora"] in (clip.get("available_loras") or set()):
@@ -140,15 +174,38 @@ def build_h3(clip: dict) -> dict:
                      "inputs": {"model": model, "lora_name": q["lora"], "strength_model": 1.0}}
         model = ["lora", 0]
 
-    cond = {"clip": ["clip", 0], "vae": ["vae_v", 0], "prompt": clip["prompt"],
-            "width": w_, "height": h_, "length": n}
-    for key, node in (("start_image", "first_frame"), ("end_image", "last_frame")):
-        if clip.get(key):
+    refs = [r for r in (clip.get("ref_images") or []) if r][:H3["max_refs"]]
+    positive = ["i2v", 0]
+    if refs:
+        # ref2va: context images condition the whole clip. Start/end frames are then
+        # pinned on top with AddGuide, so you get both at once.
+        for i, fname in enumerate(refs, 1):
+            g[f"ref{i}"] = {"class_type": "LoadImage", "inputs": {"image": fname}}
+        g["i2v"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
+            "clip": ["clip", 0], "vae": ["vae_v", 0], "audio_vae": ["vae_a", 0],
+            "prompt": tag_refs(clip["prompt"], len(refs)),
+            "width": w_, "height": h_, "length": n,
+            "ref_image_size": clip.get("ref_size") or "match",
+            # autogrow input: a dict, keyed by the template prefix. A list crashes at runtime.
+            "ref_images": {f"ref_image_{i}": [f"ref{i}", 0] for i in range(1, len(refs) + 1)}}}
+        anchors = [(k, idx) for k, idx in (("start_image", 0), ("end_image", -1)) if clip.get(k)]
+        for j, (key, frame_idx) in enumerate(anchors):
+            node = f"guide{j}"
             g[node] = {"class_type": "LoadImage", "inputs": {"image": clip[key]}}
-            cond[node] = [node, 0]
-    g["i2v"] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": cond}
+            g[f"add{j}"] = {"class_type": "MiniMaxH3AddGuide", "inputs": {
+                "positive": positive, "latent": ["i2v", 1], "frame_idx": frame_idx,
+                "vae": ["vae_v", 0], "image": [node, 0]}}
+            positive = [f"add{j}", 0]
+    else:
+        cond = {"clip": ["clip", 0], "vae": ["vae_v", 0], "prompt": clip["prompt"],
+                "width": w_, "height": h_, "length": n}
+        for key, node in (("start_image", "first_frame"), ("end_image", "last_frame")):
+            if clip.get(key):
+                g[node] = {"class_type": "LoadImage", "inputs": {"image": clip[key]}}
+                cond[node] = [node, 0]
+        g["i2v"] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": cond}
 
-    g["guider"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": ["i2v", 0]}}
+    g["guider"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": positive}}
     g["sampler"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}}
     g["sigmas"] = {"class_type": "BasicScheduler",
                    "inputs": {"model": model, "scheduler": "simple", "steps": steps, "denoise": 1.0}}

@@ -140,6 +140,15 @@ def validate(jtype, p):
         for k in ("start_image", "end_image"):
             if p.get(k) and not os.path.exists(_upload_path(p[k])):
                 raise ValueError(f"{k} not found")
+        refs = p.get("ref_images") or []
+        if refs:
+            if wf.QUALITY[p.get("quality", "standard")]["model"] != "h3":
+                raise ValueError("reference images are a MiniMax H3 feature — pick H3 Turbo or H3 Max")
+            if len(refs) > wf.H3["max_refs"]:
+                raise ValueError(f"at most {wf.H3['max_refs']} reference images")
+            for r in refs:
+                if not os.path.exists(_upload_path(r)):
+                    raise ValueError("a reference image is missing")
         qn = p.get("quality", "standard")
         if wf.QUALITY[qn]["model"] == "14b":
             w, h = dims(p.get("aspect", "16:9"), p.get("resolution", "480p"), 16)
@@ -270,6 +279,8 @@ def render_clip(ctx: Ctx, clip: dict, label: str) -> list[str]:
     for k in ("start_image", "end_image"):
         if clip.get(k):
             clip[k] = eng.upload_image(clip[k])
+    if clip.get("ref_images"):
+        clip["ref_images"] = [eng.upload_image(p) for p in clip["ref_images"]]
     dst = os.path.join(ctx.tmp, f"clip{ctx.done:03d}")
     ctx.t_clip = time.time()
     try:
@@ -362,12 +373,15 @@ def job_generate(job):
     ctx = Ctx(job, len(segs) + (1 if needs_still else 0))
     try:
         base = {"negative": p.get("negative"), "width": w, "height": h, "seed": seed_of(p), "quality": quality,
-                "cfg": p.get("cfg"), "steps": p.get("steps")}
+                "cfg": p.get("cfg"), "steps": p.get("steps"),
+                "ref_images": [_upload_path(r) for r in (p.get("ref_images") or [])],
+                "ref_size": p.get("ref_size")}
         if needs_still:
             # 14B is image->video: paint the opening frame from text with the 5B model first
             sw, sh = dims(p.get("aspect", "16:9"), "720p", 32)
             still = render_clip(ctx, dict(base, prompt=segs[0]["prompt"], width=sw, height=sh, frames=17,
-                                          quality="draft", steps=24, cfg=5.0, start_image=None, end_image=None),
+                                          quality="draft", steps=24, cfg=5.0, start_image=None,
+                                          end_image=None, ref_images=None),
                                 "painting opening frame")
             start = still[-1]  # the 5B model paints poor single stills; the end of a short clip is clean
         frames, marks = chain(ctx, segs, base, start, end, fps, snap(int(max_s * fps)))

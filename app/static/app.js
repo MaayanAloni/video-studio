@@ -11,7 +11,7 @@ const api = async (path, opt = {}) => {
 };
 const fmtT = s => s == null ? '' : s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
 
-const S = { compute: 'local', mode: 't2v', quality: 'standard', images: {}, status: null, jobs: [], videos: [], cur: null, sel: null, loop: false, seenDone: new Set(), firstPoll: true };
+const S = { refs: [], compute: 'local', mode: 't2v', quality: 'standard', images: {}, status: null, jobs: [], videos: [], cur: null, sel: null, loop: false, seenDone: new Set(), firstPoll: true };
 
 /* ------------------------------------------------------------ navigation */
 function show(view) {
@@ -88,6 +88,10 @@ function updateHints() {
     c.classList.toggle('off', S.status ? !(hq ? S.status.models.hq : S.status.models.draft) : false);
   });
   const c = +$('#cfg').value; $('#cfgVal').textContent = c > 1 ? c : '(auto)';
+  const isH3 = S.quality.startsWith('h3');
+  const canRef = isH3 && S.compute === 'remote' && (S.status?.remote_models || {}).h3_refs !== false;
+  $('#refsBox').hidden = !canRef;
+  if (!canRef && S.refs.length) { S.refs = []; drawRefs(); }
 }
 ['seconds', 'resolution', 'cfg'].forEach(id => $('#' + id).addEventListener('input', updateHints));
 
@@ -113,7 +117,30 @@ $$('.drop').forEach(d => {
   d.ondragleave = () => d.classList.remove('over');
   d.ondrop = e => { e.preventDefault(); d.classList.remove('over'); const f = e.dataTransfer.files[0]; if (f) uploadTo(d.dataset.key, f); };
 });
-$('#file').onchange = e => { if (e.target.files[0]) uploadTo(dropTarget, e.target.files[0]); e.target.value = ''; };
+$('#file').onchange = e => {
+  const f = e.target.files[0];
+  if (f) { if (dropTarget === '__ref__') uploadRef(f); else uploadTo(dropTarget, f); }
+  e.target.value = '';
+};
+async function uploadRef(file) {
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    const r = await api('/api/upload', { method: 'POST', body: fd });
+    if (S.refs.length < 9) S.refs.push(r);
+    drawRefs();
+  } catch (e) { $('#createErr').textContent = 'Upload failed: ' + e.message; }
+}
+function drawRefs() {
+  $('#refStrip').innerHTML = S.refs.map((r, i) =>
+    `<div class="ref" style="background-image:url(${r.url})"><span class="x" data-ref="${i}">✕</span><span class="n">${i + 1}</span></div>`).join('')
+    || '<div class="hint">none yet — the clip will be generated from the prompt alone</div>';
+  $('#addRef').disabled = S.refs.length >= 9;
+}
+$('#refStrip').addEventListener('click', e => {
+  const x = e.target.closest('[data-ref]');
+  if (x) { S.refs.splice(+x.dataset.ref, 1); drawRefs(); }
+});
+$('#addRef').onclick = () => { dropTarget = '__ref__'; $('#file').click(); };
 document.addEventListener('paste', e => {
   if (!$('#view-create').classList.contains('active') || S.mode === 't2v') return;
   const f = [...e.clipboardData.files].find(f => f.type.startsWith('image/'));
@@ -127,6 +154,7 @@ $('#generate').onclick = async () => {
     negative: $('#negative').value.trim() || null, style: $('#style').value.trim(), name: $('#name').value.trim() || null,
     seed: $('#seed').value === '' ? null : +$('#seed').value, variations: +$('#variations').value || 1,
     compute: S.compute,
+    ref_images: S.refs.map(r => r.name), ref_size: $('#refSize').value,
     cfg: +$('#cfg').value > 1 ? +$('#cfg').value : null,
   };
   if (S.mode === 'story') {

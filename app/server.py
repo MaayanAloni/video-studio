@@ -107,7 +107,10 @@ def status():
                        "default_for_new": bool(st.get("default_for_new"))},
             "disk_free_gb": round(free.f_bavail * free.f_frsize / 1e9, 1),
             "cameras": list(jobs.CAMERA), "aspects": list(jobs.ASPECTS), "resolutions": list(jobs.RES_PIXELS),
-            "quality": {k: {"model": v["model"], "steps": v["steps"], "fps": wf.MODELS[v["model"]]["fps"]} for k, v in wf.QUALITY.items()}}
+            "quality": {k: {"model": v["model"], "steps": v["steps"],
+                            "fps": wf.H3["fps"] if v["model"] == "h3" else wf.MODELS[v["model"]]["fps"],
+                            "remote_only": k in wf.REMOTE_ONLY}
+                        for k, v in wf.QUALITY.items()}}
 
 
 @app.get("/api/settings")
@@ -303,7 +306,8 @@ def _remote_models() -> dict:
     if eng:
         try:
             unets = eng.unet_options()
-            val = {"h3": wf.H3["unet"] in unets,
+            val = {"h3": any(n in unets for n in wf.H3["unets"]),
+                   "h3_refs": wf.h3_refs_ready(unets),
                    "ultra": wf.MODELS["14b"]["high_full"] in unets}
         except Exception:  # noqa: BLE001
             val = {}

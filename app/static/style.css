@@ -116,3 +116,7 @@ code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12px}
 .framestrip img{height:58px;border-radius:5px;flex:none;background:#000}
 a{color:var(--acc2)}
 .hint a{color:var(--acc2);text-decoration:underline}
+.refstrip{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.refstrip .ref{width:78px;height:78px;border-radius:9px;border:1.5px solid var(--line);background:var(--panel2) center/cover no-repeat;position:relative;flex:none}
+.refstrip .ref .x{position:absolute;top:2px;right:2px;background:#000b;border-radius:50%;width:19px;height:19px;line-height:19px;text-align:center;font-size:11px;cursor:pointer}
+.refstrip .ref .n{position:absolute;bottom:2px;left:4px;font-size:10px;color:#fff;text-shadow:0 1px 3px #000}
