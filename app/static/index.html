@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Studio</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<aside id="nav">
+  <div class="logo">▶ Video&nbsp;Studio</div>
+  <button class="navbtn active" data-view="create">✦ Create</button>
+  <button class="navbtn" data-view="editor">✂ Editor</button>
+  <button class="navbtn" data-view="library">▦ Library</button>
+  <button class="navbtn" data-view="queue">≡ Queue <span id="queueBadge" class="badge" hidden></span></button>
+  <div class="spacer"></div>
+  <div id="sys" class="sys"></div>
+</aside>
+
+<main>
+<!-- ============================ CREATE ============================ -->
+<section id="view-create" class="view active">
+  <div class="cols">
+    <div class="panel form">
+      <div class="tabs" id="modeTabs">
+        <button class="tab active" data-mode="t2v">Text → Video</button>
+        <button class="tab" data-mode="i2v">Image → Video</button>
+        <button class="tab" data-mode="story">Script / Storyboard</button>
+      </div>
+
+      <div id="framesRow" class="row2" hidden>
+        <div class="drop" id="dropStart" data-key="start_image"><span>Start frame<br><small>drop / click / paste</small></span></div>
+        <div class="drop" id="dropEnd" data-key="end_image"><span>End frame <small>(optional)</small><br><small>drop / click</small></span></div>
+      </div>
+
+      <div id="singlePrompt">
+        <label>Prompt</label>
+        <textarea id="prompt" rows="5" placeholder="Describe the shot: subject, action, setting, lighting, lens…"></textarea>
+      </div>
+
+      <div id="storyBox" hidden>
+        <label>Shots <small>— each shot continues from the last frame of the previous one</small></label>
+        <div id="shots"></div>
+        <button class="ghost" id="addShot">+ Add shot</button>
+        <div class="hint">Optional start / end frames apply to the first / last shot.</div>
+        <div class="row2">
+          <div class="drop small" id="dropStartS" data-key="start_image"><span>Start frame</span></div>
+          <div class="drop small" id="dropEndS" data-key="end_image"><span>End frame</span></div>
+        </div>
+      </div>
+
+      <label>Quality</label>
+      <div class="cards" id="qualityCards">
+        <div class="card" data-q="draft"><b>Draft</b><small>5B · fastest · 24fps</small><i></i></div>
+        <div class="card active" data-q="standard"><b>Standard</b><small>14B · 4 steps</small><i></i></div>
+        <div class="card" data-q="pro"><b>Pro</b><small>14B · 8 steps</small><i></i></div>
+        <div class="card" data-q="master"><b>Master</b><small>14B · 20 steps, full CFG</small><i></i></div>
+      </div>
+
+      <div class="row3">
+        <div><label>Duration (s)</label><input type="number" id="seconds" value="5" min="1" step="1"></div>
+        <div><label>Aspect</label><select id="aspect"></select></div>
+        <div><label>Resolution</label><select id="resolution"></select></div>
+      </div>
+      <div class="hint" id="durHint"></div>
+
+      <div class="row3">
+        <div><label>Camera</label><select id="camera"></select></div>
+        <div><label>Variations</label><input type="number" id="variations" value="1" min="1" max="8"></div>
+        <div><label>Seed <small>(blank = random)</small></label><input type="number" id="seed" placeholder="random"></div>
+      </div>
+
+      <details>
+        <summary>Advanced</summary>
+        <label>Negative prompt</label>
+        <textarea id="negative" rows="2" placeholder="Things to avoid (blank = sensible default)"></textarea>
+        <label>Style suffix</label>
+        <input type="text" id="style" placeholder="e.g. 35mm film, shallow depth of field, golden hour">
+        <label>Prompt adherence (CFG) <span id="cfgVal"></span> <small>— Master & Draft only</small></label>
+        <input type="range" id="cfg" min="1" max="9" step="0.5" value="0">
+        <label>Name</label>
+        <input type="text" id="name" placeholder="optional title">
+      </details>
+
+      <button class="primary" id="generate">Generate</button>
+      <div class="error" id="createErr"></div>
+    </div>
+
+    <div class="panel preview">
+      <div id="activeJob"></div>
+      <div id="latest" class="latest"><div class="empty">Your video will appear here.</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ EDITOR ============================ -->
+<section id="view-editor" class="view">
+  <div id="editorEmpty" class="empty big">Open a video from the Library (or generate one) to edit it.</div>
+  <div id="editorMain" hidden>
+    <div class="cols">
+      <div class="panel stage">
+        <div class="titlebar">
+          <input id="edName" class="title" spellcheck="false">
+          <span id="edInfo" class="muted"></span>
+          <span class="spacer"></span>
+          <select id="edVersions" title="Version history"></select>
+          <a id="edDownload" class="btn ghost">⬇ Download</a>
+        </div>
+        <div class="videoWrap"><video id="vid" playsinline preload="auto"></video></div>
+        <div class="transport">
+          <button id="btnPrev" title="Previous frame (←)">◀︎|</button>
+          <button id="btnPlay" title="Play / pause (space)">▶</button>
+          <button id="btnNext" title="Next frame (→)">|▶︎</button>
+          <button id="btnLoop" title="Loop selection (L)">⟲ Loop sel.</button>
+          <span id="tc" class="tc"></span>
+          <span class="spacer"></span>
+          <button id="btnIn" title="Set selection start (I)">[ In</button>
+          <button id="btnOut" title="Set selection end (O)">Out ]</button>
+          <button id="btnClear" title="Clear selection (Esc)">Clear</button>
+        </div>
+        <div id="timeline" class="timeline">
+          <div id="strip" class="strip"></div>
+          <div id="segs" class="segs"></div>
+          <div id="sel" class="sel" hidden><div class="h l"></div><div class="h r"></div></div>
+          <div id="playhead" class="playhead"></div>
+        </div>
+        <div class="hint">Drag on the timeline to mark a range · drag its handles to adjust · ←/→ step frames · I / O set in & out · Space play · L loop selection</div>
+      </div>
+
+      <div class="panel form side">
+        <h3>Regenerate selection</h3>
+        <div id="selInfo" class="hint">No range selected — drag on the timeline.</div>
+        <textarea id="edPrompt" rows="4" placeholder="What should happen inside the marked range? It will start on the range's first frame and land exactly on its last frame."></textarea>
+        <div class="row2">
+          <div><label>Quality</label><select id="edQuality"><option value="standard">Standard</option><option value="pro">Pro</option><option value="master">Master</option></select></div>
+          <div><label>Seed</label><input type="number" id="edSeed" placeholder="random"></div>
+        </div>
+        <button class="primary" id="btnRegen" disabled>Regenerate range</button>
+
+        <h3>Extend</h3>
+        <textarea id="exPrompt" rows="3" placeholder="What happens next? (blank = continue original prompt)"></textarea>
+        <div class="row2">
+          <div><label>Add seconds</label><input type="number" id="exSeconds" value="5" min="1"></div>
+          <div><label>Camera</label><select id="exCamera"></select></div>
+        </div>
+        <button class="primary" id="btnExtend">Extend video</button>
+
+        <h3>Tools</h3>
+        <div class="tools">
+          <button id="tKeep" class="needsSel" disabled>Keep selection</button>
+          <button id="tCut" class="needsSel" disabled>Cut selection</button>
+          <button id="tReverse">Reverse</button>
+          <button id="tInterp">Smooth 2× fps</button>
+          <button id="tUpscale">Upscale</button>
+          <button id="tJoin">Append clip…</button>
+          <button id="tFrameRef">Frame → new video</button>
+          <button id="tFrameSave">Save frame PNG</button>
+        </div>
+        <div class="error" id="edErr"></div>
+        <div id="edJobs"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ LIBRARY ============================ -->
+<section id="view-library" class="view">
+  <div class="titlebar"><h2>Library</h2><span class="spacer"></span>
+    <label class="chk"><input type="checkbox" id="favOnly"> Favorites</label>
+    <label class="chk"><input type="checkbox" id="latestOnly" checked> Hide older versions</label>
+  </div>
+  <div id="grid" class="grid"></div>
+</section>
+
+<!-- ============================ QUEUE ============================ -->
+<section id="view-queue" class="view">
+  <div class="titlebar"><h2>Queue & history</h2></div>
+  <div id="jobList"></div>
+</section>
+</main>
+
+<dialog id="pick"><h3>Append which clip?</h3><div id="pickGrid" class="grid small"></div><button class="ghost" onclick="pick.close()">Cancel</button></dialog>
+<input type="file" id="file" accept="image/*" hidden>
+<script src="app.js"></script>
+</body>
+</html>

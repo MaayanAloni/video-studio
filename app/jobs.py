@@ -1,0 +1,432 @@
+"""Job queue: one worker thread, jobs composed from the single render_clip primitive."""
+import json
+import os
+import random
+import shutil
+import tempfile
+import threading
+import time
+import traceback
+import uuid
+
+import comfy
+import media
+import workflows as wf
+
+JOBS_FILE = os.path.join(media.DATA, "jobs.json")
+PERF_FILE = os.path.join(media.DATA, "perf.json")
+MAX_SECONDS = 5.0  # longest single model pass; anything longer is chained
+
+ASPECTS = {"16:9": (16, 9), "9:16": (9, 16), "1:1": (1, 1), "4:3": (4, 3), "3:4": (3, 4), "21:9": (21, 9)}
+RES_PIXELS = {"360p": 640 * 368, "480p": 832 * 480, "580p": 1024 * 576, "720p": 1280 * 704}
+
+CAMERA = {
+    "": "",
+    "static": "static locked-off camera, no camera movement",
+    "zoom_in": "slow cinematic camera zoom in, dolly in",
+    "zoom_out": "slow camera zoom out, dolly out, revealing the scene",
+    "pan_left": "camera pans left smoothly",
+    "pan_right": "camera pans right smoothly",
+    "tilt_up": "camera tilts up",
+    "tilt_down": "camera tilts down",
+    "orbit": "camera orbits around the subject, arc shot",
+    "tracking": "tracking shot following the subject",
+    "handheld": "handheld camera, subtle natural shake",
+    "crane_up": "crane shot, camera rises up",
+    "fpv": "fast FPV drone shot flying through the scene",
+}
+
+_lock = threading.RLock()
+_jobs: dict[str, dict] = {}
+_order: list[str] = []
+_cancel: set[str] = set()
+_wake = threading.Event()
+
+
+def _load():
+    if os.path.exists(JOBS_FILE):
+        try:
+            with open(JOBS_FILE) as f:
+                for j in json.load(f):
+                    if j["status"] in ("queued", "running"):
+                        j["status"], j["error"] = "error", "interrupted by restart"
+                    _jobs[j["id"]] = j
+                    _order.append(j["id"])
+        except (OSError, ValueError):
+            pass
+
+
+def _persist():
+    with _lock:
+        tmp = JOBS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump([_jobs[i] for i in _order[-200:]], f, ensure_ascii=False)
+        os.replace(tmp, JOBS_FILE)
+
+
+def _perf():
+    try:
+        with open(PERF_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def submit(jtype: str, params: dict) -> dict:
+    validate(jtype, params)
+    j = {"id": uuid.uuid4().hex[:12], "type": jtype, "params": params, "status": "queued", "progress": 0.0,
+         "stage": "queued", "created": time.time(), "video": None, "error": None, "eta": None}
+    with _lock:
+        _jobs[j["id"]] = j
+        _order.append(j["id"])
+    _persist()
+    _wake.set()
+    return j
+
+
+def all_jobs():
+    with _lock:
+        return [dict(_jobs[i]) for i in reversed(_order)]
+
+
+def cancel(jid):
+    with _lock:
+        j = _jobs.get(jid)
+        if not j:
+            return
+        if j["status"] == "queued":
+            j["status"] = "cancelled"
+        elif j["status"] == "running":
+            _cancel.add(jid)
+            comfy.interrupt()
+    _persist()
+
+
+def remove(jid):
+    with _lock:
+        j = _jobs.get(jid)
+        if j and j["status"] not in ("queued", "running"):
+            _jobs.pop(jid)
+            _order.remove(jid)
+    _persist()
+
+
+# ---------------------------------------------------------------- validation
+
+def validate(jtype, p):
+    if jtype == "generate":
+        if not (p.get("prompt") or "").strip() and not p.get("segments"):
+            raise ValueError("prompt is required")
+        if p.get("quality", "standard") not in wf.QUALITY:
+            raise ValueError("unknown quality")
+        if p.get("end_image") and wf.QUALITY[p.get("quality", "standard")]["model"] != "14b":
+            raise ValueError("an end frame needs Standard/Pro/Master quality (14B model)")
+        for k in ("start_image", "end_image"):
+            if p.get(k) and not os.path.exists(_upload_path(p[k])):
+                raise ValueError(f"{k} not found")
+    elif jtype in ("extend", "edit_range", "interpolate", "upscale", "trim", "join", "reverse"):
+        if not os.path.exists(media.vdir(p.get("video", "?"))):
+            raise ValueError("video not found")
+        if jtype == "edit_range":
+            m = media.meta(p["video"])
+            f0, f1 = int(p["f0"]), int(p["f1"])
+            if not (0 <= f0 < f1 < m["frames"]) or f1 - f0 < 4:
+                raise ValueError("range must span at least 5 frames inside the video")
+            if not (p.get("prompt") or "").strip():
+                raise ValueError("prompt is required")
+        if jtype == "join" and not os.path.exists(media.vdir(p.get("other", "?"))):
+            raise ValueError("second video not found")
+    else:
+        raise ValueError("unknown job type")
+
+
+def _upload_path(name):
+    return os.path.join(media.UPLOADS, os.path.basename(name))
+
+
+# ---------------------------------------------------------------- helpers
+
+def dims(aspect, resolution, grid):
+    a, b = ASPECTS.get(aspect, (16, 9))
+    px = RES_PIXELS.get(resolution, RES_PIXELS["480p"])
+    h = wf.snap_dim(int((px * b / a) ** 0.5), grid)
+    return wf.snap_dim(int(px / h), grid), h
+
+
+def split_seconds(total, max_s=MAX_SECONDS):
+    n = max(1, int(-(-total // max_s)))
+    return [total / n] * n
+
+
+def full_prompt(prompt, camera, style=""):
+    parts = [prompt.strip(), CAMERA.get(camera or "", ""), (style or "").strip()]
+    return ", ".join(x for x in parts if x)
+
+
+class Ctx:
+    def __init__(self, job, total_clips):
+        self.job, self.total, self.done = job, max(1, total_clips), 0
+        self.tmp = tempfile.mkdtemp(prefix="vs_", dir=media.DATA)
+        self.t_clip = None
+
+    def cancelled(self):
+        return self.job["id"] in _cancel
+
+    def stage(self, s):
+        self.job["stage"] = s
+
+    def progress(self, frac, node):
+        if frac is None:
+            return
+        j = self.job
+        j["progress"] = round((self.done + frac) / self.total, 4)
+        if frac > 0.02 and self.t_clip:
+            per_clip = (time.time() - self.t_clip) / frac
+            j["eta"] = int(per_clip * (self.total - self.done - frac))
+
+
+def render_clip(ctx: Ctx, clip: dict, label: str) -> list[str]:
+    """Render one model pass, return frame paths inside ctx.tmp."""
+    ctx.stage(label)
+    clip = dict(clip, prefix=f"vs/{ctx.job['id']}_{ctx.done:03d}")
+    for k in ("start_image", "end_image"):
+        if clip.get(k):
+            clip[k] = comfy.upload_image(clip[k])
+    ctx.t_clip = time.time()
+    files = comfy.run(wf.build(clip), ctx.progress, ctx.cancelled)
+    dst = os.path.join(ctx.tmp, f"clip{ctx.done:03d}")
+    os.makedirs(dst)
+    out = []
+    for i, f in enumerate(files):
+        p = os.path.join(dst, f"{i:06d}.png")
+        shutil.move(f, p)
+        out.append(p)
+    perf = _perf()
+    perf[clip["quality"]] = {"sec": time.time() - ctx.t_clip, "frames": len(out), "px": clip["width"] * clip["height"]}
+    with open(PERF_FILE, "w") as f:
+        json.dump(perf, f)
+    ctx.done += 1
+    ctx.job["progress"] = round(ctx.done / ctx.total, 4)
+    return out
+
+
+def chain(ctx, segs, base, start_image, end_image, fps, max_frames):
+    """Render consecutive segments; each starts on the previous one's last frame.
+    segs: [{prompt, frames}] -> (all frames, [{start,end,prompt}])"""
+    frames, marks = [], []
+    for i, s in enumerate(segs):
+        clip = dict(base, prompt=s["prompt"], frames=min(s["frames"], max_frames), seed=base["seed"] + i,
+                    start_image=start_image if i == 0 else frames[-1],
+                    end_image=end_image if i == len(segs) - 1 else None)
+        got = render_clip(ctx, clip, f"segment {i + 1}/{len(segs)}")
+        a = len(frames)
+        frames += got if i == 0 or not frames else got[1:]
+        if i == 0 and start_image is None:
+            pass
+        marks.append({"start": a, "end": len(frames) - 1, "prompt": s["prompt"]})
+    return frames, marks
+
+
+def seed_of(p):
+    s = p.get("seed")
+    return int(s) if s not in (None, "", -1, "-1") else random.randint(1, 2**31 - 1)
+
+
+# ---------------------------------------------------------------- job types
+
+def job_generate(job):
+    p = job["params"]
+    quality = p.get("quality", "standard")
+    q = wf.QUALITY[quality]
+    model = wf.MODELS[q["model"]]
+    fps = model["fps"]
+    w, h = dims(p.get("aspect", "16:9"), p.get("resolution", "480p"), model["grid"])
+    style = p.get("style", "")
+    if p.get("segments"):
+        segs = []
+        for s in p["segments"]:
+            for sec in split_seconds(float(s.get("seconds") or 5)):
+                segs.append({"prompt": full_prompt(s["prompt"], s.get("camera") or p.get("camera"), style),
+                             "frames": wf.snap_len(round(sec * fps))})
+    else:
+        segs = [{"prompt": full_prompt(p["prompt"], p.get("camera"), style), "frames": wf.snap_len(round(sec * fps))}
+                for sec in split_seconds(float(p.get("seconds") or 5))]
+    start = _upload_path(p["start_image"]) if p.get("start_image") else None
+    end = _upload_path(p["end_image"]) if p.get("end_image") else None
+    needs_still = q["model"] == "14b" and not start
+    ctx = Ctx(job, len(segs) + (1 if needs_still else 0))
+    try:
+        base = {"negative": p.get("negative"), "width": w, "height": h, "seed": seed_of(p), "quality": quality,
+                "cfg": p.get("cfg"), "steps": p.get("steps")}
+        if needs_still:
+            # 14B is image->video: paint the opening frame from text with the 5B model first
+            sw, sh = dims(p.get("aspect", "16:9"), "720p", 32)
+            still = render_clip(ctx, dict(base, prompt=segs[0]["prompt"], width=sw, height=sh, frames=1,
+                                          quality="draft", steps=24, cfg=5.0, start_image=None, end_image=None),
+                                "painting opening frame")
+            start = still[0]
+        frames, marks = chain(ctx, segs, base, start, end, fps, wf.snap_len(int(MAX_SECONDS * fps)))
+        ctx.stage("encoding")
+        info = {"op": "generate", "prompt": p.get("prompt") or segs[0]["prompt"], "params": p, "seed": base["seed"],
+                "segments": marks, "parent": None, "quality": quality}
+        if p.get("name"):
+            info["name"] = p["name"]
+        return media.create_video(frames, fps, info)
+    finally:
+        shutil.rmtree(ctx.tmp, ignore_errors=True)
+
+
+def _edit_quality(p):
+    q = p.get("quality", "standard")
+    return q if wf.QUALITY[q]["model"] == "14b" else "standard"
+
+
+def job_extend(job):
+    p = job["params"]
+    m = media.meta(p["video"])
+    src = media.frames_of(p["video"])
+    quality = _edit_quality(p)
+    secs = split_seconds(float(p.get("seconds") or 5))
+    fps = m["fps"]
+    ctx = Ctx(job, len(secs))
+    try:
+        base = {"negative": p.get("negative"), "width": m["width"], "height": m["height"], "seed": seed_of(p),
+                "quality": quality, "cfg": p.get("cfg")}
+        prompt = full_prompt(p.get("prompt") or m.get("prompt", ""), p.get("camera"))
+        segs = [{"prompt": prompt, "frames": wf.snap_len(round(s * fps))} for s in secs]
+        end = _upload_path(p["end_image"]) if p.get("end_image") else None
+        new, marks = chain(ctx, segs, base, src[-1], end, fps, 81)
+        off = len(src) - 1
+        marks = [{"start": k["start"] + off, "end": k["end"] + off, "prompt": k["prompt"]} for k in marks]
+        ctx.stage("encoding")
+        return media.create_video(src + new[1:], fps, {
+            "op": "extend", "prompt": m.get("prompt"), "params": p, "parent": m["id"], "name": m.get("name"),
+            "segments": (m.get("segments") or []) + marks, "quality": quality})
+    finally:
+        shutil.rmtree(ctx.tmp, ignore_errors=True)
+
+
+def plan_range(f0, f1, total, max_len=81):
+    """Snap [f0,f1] so its length is 4k+1 and split it into chunks that share boundary frames."""
+    n = wf.snap_len(f1 - f0 + 1)
+    while n > total:
+        n -= 4
+    if f0 + n > total:
+        f0 = total - n
+    f1 = f0 + n - 1
+    steps = (n - 1) // 4                      # each chunk is 4*s+1 frames; chunks overlap by one frame
+    k = -(-steps // ((max_len - 1) // 4))
+    chunks = [4 * (steps // k + (1 if i < steps % k else 0)) + 1 for i in range(k)]
+    return f0, f1, chunks
+
+
+def job_edit_range(job):
+    p = job["params"]
+    m = media.meta(p["video"])
+    src = media.frames_of(p["video"])
+    f0, f1, chunks = plan_range(int(p["f0"]), int(p["f1"]), len(src))
+    quality = _edit_quality(p)
+    ctx = Ctx(job, len(chunks))
+    try:
+        base = {"negative": p.get("negative"), "width": m["width"], "height": m["height"], "seed": seed_of(p),
+                "quality": quality, "cfg": p.get("cfg")}
+        prompt = full_prompt(p["prompt"], p.get("camera"))
+        gen = []
+        for i, c in enumerate(chunks):
+            last = i == len(chunks) - 1
+            clip = dict(base, prompt=prompt, frames=c, seed=base["seed"] + i,
+                        start_image=src[f0] if i == 0 else gen[-1], end_image=src[f1] if last else None)
+            got = render_clip(ctx, clip, f"regenerating range, part {i + 1}/{len(chunks)}")
+            gen += got if i == 0 else got[1:]
+        # keep the ORIGINAL boundary frames so the cut points are pixel-identical to the untouched footage
+        interior = gen[1:len(gen) - 1]
+        want = f1 - f0 - 1
+        if len(interior) != want:  # defensive: resample to fit exactly
+            interior = [interior[round(i * (len(interior) - 1) / max(1, want - 1))] for i in range(want)]
+        frames = src[:f0 + 1] + interior + src[f1:]
+        ctx.stage("encoding")
+        segs = [s for s in (m.get("segments") or [])]
+        return media.create_video(frames, m["fps"], {
+            "op": "edit_range", "prompt": m.get("prompt"), "params": p, "parent": m["id"], "name": m.get("name"),
+            "segments": segs, "edits": (m.get("edits") or []) + [{"start": f0, "end": f1, "prompt": p["prompt"]}],
+            "quality": quality})
+    finally:
+        shutil.rmtree(ctx.tmp, ignore_errors=True)
+
+
+def job_simple(job):
+    """ffmpeg-only operations."""
+    p, t = job["params"], job["type"]
+    m = media.meta(p["video"])
+    src = media.frames_of(p["video"])
+    ctx = Ctx(job, 1)
+    try:
+        fps, frames = m["fps"], src
+        ctx.stage(t)
+        if t == "interpolate":
+            fps = m["fps"] * 2
+            frames = media.filtered_copy(m["id"], f"minterpolate=fps={fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1", fps, ctx.tmp + "/o")
+        elif t == "upscale":
+            s = 2 if m["width"] * 2 <= 2600 else 1.5
+            frames = media.filtered_copy(m["id"], f"scale=trunc(iw*{s}/2)*2:trunc(ih*{s}/2)*2:flags=lanczos,unsharp=5:5:0.6", fps, ctx.tmp + "/o")
+        elif t == "trim":
+            a, b = max(0, int(p["f0"])), min(len(src) - 1, int(p["f1"]))
+            frames = src[:a] + src[b + 1:] if p.get("mode") == "cut" else src[a:b + 1]
+            if len(frames) < 2:
+                raise ValueError("nothing left after trim")
+        elif t == "reverse":
+            frames = src[::-1]
+        elif t == "join":
+            o = media.meta(p["other"])
+            other = media.frames_of(p["other"])
+            if (o["width"], o["height"]) != (m["width"], m["height"]):
+                os.makedirs(ctx.tmp + "/o")
+                fit = []
+                for i, f in enumerate(other):
+                    d = f"{ctx.tmp}/o/{i:06d}.png"
+                    media.fit_image(f, m["width"], m["height"], d)
+                    fit.append(d)
+                other = fit
+            frames = src + other
+        return media.create_video(frames, fps, {"op": t, "prompt": m.get("prompt"), "params": p, "parent": m["id"],
+                                                "name": m.get("name"), "quality": m.get("quality")})
+    finally:
+        shutil.rmtree(ctx.tmp, ignore_errors=True)
+
+
+RUNNERS = {"generate": job_generate, "extend": job_extend, "edit_range": job_edit_range}
+
+
+def _worker():
+    while True:
+        _wake.wait(timeout=2)
+        _wake.clear()
+        while True:
+            with _lock:
+                job = next((_jobs[i] for i in _order if _jobs[i]["status"] == "queued"), None)
+                if job:
+                    job["status"], job["started"] = "running", time.time()
+            if not job:
+                break
+            try:
+                n = max(1, int(job["params"].get("variations") or 1)) if job["type"] == "generate" else 1
+                vids = []
+                for v in range(n):
+                    if n > 1:
+                        job["params"] = dict(job["params"], seed=seed_of(job["params"]) + v * 1000)
+                    vids.append(RUNNERS.get(job["type"], job_simple)(job)["id"])
+                job.update(status="done", progress=1.0, stage="done", video=vids[-1], videos=vids, eta=0)
+            except comfy.Cancelled:
+                job.update(status="cancelled", stage="cancelled")
+            except Exception as e:  # noqa: BLE001 - surface every failure to the UI
+                traceback.print_exc()
+                job.update(status="error", stage="error", error=str(e)[:800])
+            finally:
+                _cancel.discard(job["id"])
+                job["finished"] = time.time()
+                _persist()
+
+
+def start():
+    _load()
+    threading.Thread(target=_worker, daemon=True).start()

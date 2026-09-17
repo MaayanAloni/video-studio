@@ -1,0 +1,6 @@
+engine/
+.venv/
+dl_cache/
+data/
+logs/
+__pycache__/
