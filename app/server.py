@@ -123,6 +123,14 @@ def put_settings(body: dict):
     p = dict(body.get("runpod") or {})
     if p.get("api_key") == "********":
         p.pop("api_key")
+    if p.get("api_key"):
+        old = settings_mod.load()["runpod"].get("api_key", "")
+        if old and p["api_key"] != old:
+            # a different account cannot see the previous account's pod or volume
+            p.setdefault("pod_id", "")
+            p.setdefault("volume_id", "")
+            rp.close_tunnel()
+            settings_mod.save({"remote": {"enabled": False, "url": "", "label": ""}})
     if p:
         settings_mod.save({"runpod": p})
     r = dict(body.get("remote") or {})
@@ -180,7 +188,7 @@ def rp_launch(body: dict = None):
     try:
         vol = cfg.get("volume_id")
         if body.get("use_volume", True) and not vol:
-            size = int(body.get("volume_gb") or 300)
+            size = int(body.get("volume_gb") or cfg.get("volume_gb") or 100)
             vol = rp.create_volume(key, "video-studio-models", size, dc).get("id", "")
         pod = rp.create_pod(key, gpu, dc, vol)
         settings_mod.save({"runpod": {"pod_id": pod["id"], "gpu": gpu, "datacenter": dc, "volume_id": vol or ""}})

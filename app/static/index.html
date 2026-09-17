@@ -60,8 +60,22 @@
         </div>
       </div>
 
+      <div id="refsBox" hidden>
+        <label>Reference images <small>— up to 9; H3 keeps their subject, style and identity consistent</small></label>
+        <div class="refstrip" id="refStrip"></div>
+        <div class="row2">
+          <button class="ghost" id="addRef">+ Add reference</button>
+          <select id="refSize" title="How much detail of each reference to feed the model">
+            <option value="match">Normal detail (faster)</option>
+            <option value="max">Maximum identity fidelity (slower)</option>
+          </select>
+        </div>
+        <div class="hint">These stack <b>on top of</b> start/end frames — you can use both. Mention them in
+          the prompt as <code>&lt;Picture 1&gt;</code>, or leave it and they are tagged automatically.</div>
+      </div>
+
       <label>Quality</label>
-      <div class="cards" id="qualityCards">
+      <div class="cards cards5" id="qualityCards">
         <div class="card" data-q="draft"><b>Draft</b><small>5B · fastest · 24fps</small><i></i></div>
         <div class="card active" data-q="standard"><b>Standard</b><small>14B · 4 steps</small><i></i></div>
         <div class="card" data-q="pro"><b>Pro</b><small>14B · 8 steps</small><i></i></div>

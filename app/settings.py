@@ -23,7 +23,8 @@ DEFAULT = {
         "gpu": "NVIDIA A100 80GB PCIe",
         "datacenter": "CA-MTL-3",
         "volume_id": "",
-        "models": "full",      # 'full' = unquantised Wan fp16, 'h3' = MiniMax H3
+        "models": "h3",        # 'h3' = MiniMax H3 (+refs), 'full' = Wan fp16, 'full+h3' = both
+        "volume_gb": 100,      # H3 + reference model + basics is ~82 GB
     },
 }
 
