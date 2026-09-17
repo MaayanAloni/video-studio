@@ -221,6 +221,8 @@ class Ctx:
             if not self.available:
                 raise comfy.EngineError("remote engine reported no loadable models")
         self.tmp = tempfile.mkdtemp(prefix="vs_", dir=media.DATA)
+        job["tmpdir"] = self.tmp        # lets the UI browse finished frames mid-render
+        job["frames_done"] = 0
         self.t_clip = None
 
     def cancelled(self):
@@ -283,6 +285,7 @@ def render_clip(ctx: Ctx, clip: dict, label: str) -> list[str]:
         json.dump(perf, f)
     ctx.done += 1
     ctx.job["progress"] = round(ctx.done / ctx.total, 4)
+    ctx.job["frames_done"] = ctx.job.get("frames_done", 0) + len(out)
     return out
 
 

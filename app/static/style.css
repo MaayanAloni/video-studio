@@ -13,7 +13,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMa
 .sys{font-size:11px;color:var(--muted);padding:8px 10px;line-height:1.7}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--err)}
 .dot.ok{background:var(--acc2)}.dot.warn{background:var(--warn)}
-main{flex:1;overflow:auto;padding:20px;min-width:0}
+main{flex:1;overflow-y:auto;overflow-x:hidden;padding:20px 20px 60px;min-width:0}
 .view{display:none}.view.active{display:block}
 .cols{display:grid;grid-template-columns:minmax(340px,440px) 1fr;gap:20px;align-items:start}
 #view-editor .cols{grid-template-columns:1fr minmax(300px,360px)}
@@ -106,3 +106,13 @@ code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12px}
 .st.remote{background:#7c5cff33;color:#c3b4ff}
 .cards5{grid-template-columns:repeat(5,1fr)}
 @media(max-width:1300px){.cards5{grid-template-columns:repeat(3,1fr)}}
+.settings-col{max-width:640px}
+.sep{border:none;border-top:1px solid var(--line);margin:18px 0}
+.podbadge{margin:8px 10px;padding:10px;border-radius:10px;background:#21d4a314;border:1px solid #21d4a355;font-size:11px;line-height:1.6}
+.podbadge.paying{background:#ffb84d14;border-color:#ffb84d66}
+.podbadge b{display:block;font-size:12px;margin-bottom:2px}
+.podbadge button{width:100%;margin-top:8px;padding:5px;font-size:11px}
+.framestrip{display:flex;gap:4px;overflow-x:auto;margin-top:8px;padding-bottom:4px}
+.framestrip img{height:58px;border-radius:5px;flex:none;background:#000}
+a{color:var(--acc2)}
+.hint a{color:var(--acc2);text-decoration:underline}

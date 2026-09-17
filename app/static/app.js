@@ -20,7 +20,7 @@ function show(view) {
   if (view !== 'editor') $('#vid').pause();
   if (view === 'library') renderLibrary();
   if (view === 'logs') refreshLogs(true);
-  if (view === 'settings') { loadSettings(); rpLoadCatalog().then(rpPoll); }
+  if (view === 'settings') { loadSettings(); rpLoadCatalog(); rpPoll(); }
 }
 $$('.navbtn').forEach(b => b.onclick = () => show(b.dataset.view));
 
@@ -150,7 +150,8 @@ function jobHTML(j) {
     ${run ? `<div class="bar"><div style="width:${pct}%"></div></div>` : ''}
     ${j.error ? `<div class="error">${esc(j.error)}</div>` : ''}
     ${run ? `<div class="prevwrap" id="pw_${j.id}" hidden><img class="jobprev" id="prev_${j.id}" alt="">
-      <div class="prevcap">live preview — approximate, refines as it samples</div></div>` : ''}</div>`;
+      <div class="prevcap">live preview — frames sampled across the whole clip, sharpening each step</div></div>
+      <div class="framestrip" id="fs_${j.id}"></div>` : ''}</div>`;
 }
 document.addEventListener('click', async e => {
   const t = e.target.closest('[data-open],[data-cancel],[data-del]');
@@ -185,6 +186,17 @@ async function poll() {
         el.onload = () => { const w = el.closest('.prevwrap'); if (w) w.hidden = false; };
         el.src = `/api/jobs/${j.id}/preview?t=${stamp}`;
       }
+    }
+  }
+  // finished frames of the running job (whole segments, real output)
+  for (const j of S.jobs) {
+    if (j.status !== 'running' || !j.frames_done) continue;
+    for (const strip of $$(`#fs_${j.id}`)) {
+      if (strip.dataset.n === String(j.frames_done)) continue;
+      strip.dataset.n = String(j.frames_done);
+      const n = Math.min(j.frames_done, 24);
+      strip.innerHTML = Array.from({ length: n }, (_, i) =>
+        `<img loading="lazy" src="/api/jobs/${j.id}/frames/${Math.round(i * (j.frames_done - 1) / Math.max(1, n - 1))}?w=160">`).join('');
     }
   }
   let newDone = null;
@@ -410,9 +422,13 @@ async function loadSettings() {
   $('#rToken').value = r.token || ''; $('#rLabel').value = r.label || '';
   $('#rDefault').checked = !!r.default_for_new;
   const p = s.runpod || {};
-  $('#pKey').value = p.api_key || '';
+  $('#pKey').value = p.api_key === '********' ? '' : '';
+  $('#pKey').placeholder = p.api_key ? 'key saved — paste a new one to replace it' : 'rpa_…';
+  $('#pSetup').hidden = !p.api_key;
+  await rpLoadCatalog();
   if (p.gpu) $('#pGpu').value = p.gpu;
   if (p.datacenter) $('#pDc').value = p.datacenter;
+  rpCost();
 }
 $('#rSave').onclick = async () => {
   $('#rResult').textContent = 'saving…';
@@ -441,68 +457,88 @@ $('#rTest').onclick = async () => {
 let rpCat = null;
 async function rpLoadCatalog() {
   if (rpCat) return rpCat;
-  rpCat = await api('/api/runpod/catalog');
+  try { rpCat = await api('/api/runpod/catalog'); } catch { return null; }
   $('#pGpu').innerHTML = (rpCat.gpus || []).map(g =>
-    `<option value="${esc(g.id)}" data-hr="${g.usd_hr}">${esc(g.name)} · ${g.vram_gb} GB · $${g.usd_hr}/hr</option>`).join('')
-    || '<option>could not load GPU list</option>';
-  $('#pDc').innerHTML = (rpCat.datacenters || []).map(d => `<option>${esc(d)}</option>`).join('');
+    `<option value="${esc(g.id)}" data-hr="${g.usd_hr}">${esc(g.name)} · ${g.vram_gb} GB · $${g.usd_hr}/hr</option>`).join('');
+  $('#pDc').innerHTML = (rpCat.datacenters || []).map(d =>
+    `<option value="${esc(d)}">${d.startsWith('CA') ? 'Canada' : d.startsWith('AP-JP') ? 'Japan' : d.startsWith('EUR-IS') ? 'Iceland' : d.startsWith('EUR-NO') ? 'Norway' : esc(d)} (${esc(d)})</option>`).join('');
   rpCost();
   return rpCat;
 }
 function rpCost() {
-  const o = $('#pGpu').selectedOptions[0];
-  const hr = o && +o.dataset.hr;
-  $('#pCost').textContent = hr ? `$${hr.toFixed(2)}/hr — a 5-second Ultra clip is roughly $${(hr * 0.4).toFixed(2)}. Storage is billed separately and continues while the pod is stopped.` : '';
+  const o = $('#pGpu').selectedOptions[0], hr = o && +o.dataset.hr;
+  $('#pCost').textContent = hr ? `$${hr.toFixed(2)} per hour while it runs, billed by the second. Stopping it stops the charge.` : '';
 }
 $('#pGpu').onchange = rpCost;
 const rpSay = (t, err) => $('#pStatus').innerHTML = err ? `<span style="color:var(--err)">${esc(t)}</span>` : esc(t);
 
-async function rpSaveKey() {
+$('#pSaveKey').onclick = async () => {
   const k = $('#pKey').value.trim();
-  if (k && k !== '********') await api('/api/settings', { method: 'PUT', body: { runpod: { api_key: k } } });
-}
-$('#pLaunch').onclick = async () => {
-  if (!confirm('Rent a GPU now? Billing starts immediately and continues until you press Stop.')) return;
-  await rpSaveKey();
-  rpSay('renting…');
+  if (!k) return rpSay('paste your key first', true);
   try {
-    const r = await api('/api/runpod/launch', { method: 'POST', body: {
-      gpu: $('#pGpu').value, datacenter: $('#pDc').value, use_volume: $('#pVol').checked } });
-    rpSay(`pod ${r.pod_id} created ($${r.cost_hr}/hr). It can take several minutes to boot — then press Install models.`);
-    rpPoll();
+    await api('/api/settings', { method: 'PUT', body: { runpod: { api_key: k } } });
+    $('#pSetup').hidden = false; rpSay('key saved. Now choose a GPU and rent it.'); rpLoadCatalog();
   } catch (e) { rpSay(e.message, true); }
 };
-$('#pProvision').onclick = async () => {
-  rpSay('installing ComfyUI and downloading models on the pod…');
-  try { const r = await api('/api/runpod/provision', { method: 'POST', body: {} }); rpSay(r.note); }
-  catch (e) { rpSay(e.message, true); }
-};
-$('#pConnect').onclick = async () => {
-  rpSay('opening SSH tunnel…');
+
+// one button: rent -> wait for boot -> install models -> connect
+$('#pLaunch').onclick = async () => {
+  const o = $('#pGpu').selectedOptions[0];
+  if (!confirm(`Rent ${o ? o.textContent : 'this GPU'}?\n\nBilling starts now and runs until you press Stop.`)) return;
+  $('#pLaunch').disabled = true;
   try {
-    const r = await api('/api/runpod/connect', { method: 'POST', body: {} });
-    rpSay(r.engine_reachable ? `connected via ${r.url} — Ultra quality is now available.` : (r.hint || 'tunnel open, engine not answering yet'));
+    rpSay('renting a GPU…');
+    await api('/api/runpod/launch', { method: 'POST', body: { gpu: $('#pGpu').value, datacenter: $('#pDc').value, use_volume: true } });
+    rpSay('waiting for the machine to boot (this can take several minutes)…');
+    let ip = null;
+    for (let i = 0; i < 150; i++) {
+      const s = await api('/api/runpod/status'); rpBadge(s);
+      if (s.pod && s.pod.ip) { ip = s.pod.ip; break; }
+      await new Promise(r => setTimeout(r, 6000));
+    }
+    if (!ip) { rpSay('the machine is taking unusually long to boot — check the RunPod console', true); return; }
+    rpSay('installing models on the rented machine (watch Logs → provision)…');
+    await api('/api/runpod/provision', { method: 'POST', body: {} });
+    rpSay('connecting…');
+    let ok = false;
+    for (let i = 0; i < 120; i++) {
+      try { const r = await api('/api/runpod/connect', { method: 'POST', body: {} }); if (r.engine_reachable) { ok = true; break; } } catch {}
+      await new Promise(r => setTimeout(r, 10000));
+    }
+    rpSay(ok ? 'ready — pick Ultra quality in Create and set “Render on” to the rented GPU.'
+            : 'machine is up, still installing. This page will keep checking; Ultra appears when it is ready.');
     await pollStatus();
   } catch (e) { rpSay(e.message, true); }
+  finally { $('#pLaunch').disabled = false; }
 };
-$('#pStop').onclick = async () => {
-  if (!confirm('Stop the pod? Billing for compute stops. Your model volume is kept.')) return;
-  try { await api('/api/runpod/disconnect', { method: 'POST', body: { action: 'stop' } }); rpSay('pod stopped — compute billing off.'); await pollStatus(); }
+
+async function rpStop(action) {
+  const msg = action === 'terminate'
+    ? 'Delete the rented machine completely? Your installed models are kept for next time.'
+    : 'Stop the rented machine? Charges for computing stop immediately.';
+  if (!confirm(msg)) return;
+  try { await api('/api/runpod/disconnect', { method: 'POST', body: { action } }); rpSay('stopped — you are no longer being charged for computing.'); await pollStatus(); rpPoll(); }
   catch (e) { rpSay(e.message, true); }
-};
-$('#pTerminate').onclick = async () => {
-  if (!confirm('Terminate and DELETE this pod? This cannot be undone. The model volume survives.')) return;
-  try { await api('/api/runpod/disconnect', { method: 'POST', body: { action: 'terminate' } }); rpSay('pod terminated.'); await pollStatus(); }
-  catch (e) { rpSay(e.message, true); }
-};
+}
+
+function rpBadge(s) {
+  const el = $('#podBadge');
+  const p = s && s.pod;
+  if (!s || !s.pod_id || !p) { el.hidden = true; return; }
+  const running = p.status === 'RUNNING';
+  el.hidden = false;
+  el.classList.toggle('paying', running);
+  const mins = p.started ? Math.max(0, Math.round((Date.now() - new Date(p.started).getTime()) / 60000)) : null;
+  const hr = +p.cost_hr || 0;
+  el.innerHTML = `<b>${running ? '● Rented GPU running' : '○ Rented GPU ' + esc(p.status || '')}</b>
+    ${running ? `$${hr.toFixed(2)}/hr${mins != null ? ` · ${mins} min · ~$${(hr * mins / 60).toFixed(2)} so far` : ''}` : 'not being charged for computing'}
+    <br>${s.tunnel && s.tunnel.up ? 'connected' : 'not connected'}
+    ${running ? '<button id="podStop">Stop — end charges</button>' : ''}`;
+  const b = $('#podStop'); if (b) b.onclick = () => rpStop('stop');
+}
+
 async function rpPoll() {
-  try {
-    const s = await api('/api/runpod/status');
-    if (!s.pod_id) return;
-    const p = s.pod || {};
-    const up = s.tunnel?.up;
-    rpSay(`pod ${s.pod_id} · ${p.status || '?'} · ${p.ip ? `${p.ip}:${p.ssh_port}` : 'no IP yet'} · $${p.cost_hr || '?'}/hr · tunnel ${up ? 'up' : 'down'}`);
-  } catch { /* not configured */ }
+  try { const s = await api('/api/runpod/status'); rpBadge(s); return s; } catch { return null; }
 }
 
 /* ------------------------------------------------------------ boot */
@@ -515,4 +551,5 @@ async function rpPoll() {
   if (st.models && !st.models.hq && st.models.draft) $('[data-q=draft]').click();
   await loadVideos(); await poll(); updateHints();
   setInterval(poll, 1500); setInterval(pollStatus, 8000);
+  rpPoll(); setInterval(rpPoll, 20000);
 })();

@@ -16,6 +16,7 @@
   <button class="navbtn" data-view="logs">▤ Logs</button>
   <button class="navbtn" data-view="settings">⚙ Settings</button>
   <div class="spacer"></div>
+  <div id="podBadge" class="podbadge" hidden></div>
   <div id="sys" class="sys"></div>
 </aside>
 
@@ -190,7 +191,6 @@
   <div class="titlebar"><h2>Queue & history</h2></div>
   <div id="jobList"></div>
 </section>
-</main>
 
 <!-- ============================ LOGS ============================ -->
 <section id="view-logs" class="view">
@@ -212,60 +212,49 @@
 <!-- ============================ SETTINGS ============================ -->
 <section id="view-settings" class="view">
   <div class="titlebar"><h2>Settings</h2></div>
-  <div class="panel form" style="max-width:680px">
-    <h3 style="margin-top:0">Rented GPU <small class="muted">— optional</small></h3>
-    <div class="hint">Everything stays on this Mac unless you switch a job to the rented GPU. Off by default.
-      Prompts, reference images and rendered frames are sent to whatever machine you point this at.</div>
 
-    <label class="chk" style="margin-top:14px"><input type="checkbox" id="rEnabled"> Enable rented GPU</label>
+  <div class="panel form settings-col">
+    <h3 style="margin-top:0">Rented GPU <small class="muted">— optional, off by default</small></h3>
+    <div class="hint">Your Mac renders everything on its own. Renting a GPU is only for speed and for the
+      <b>Ultra</b> quality tier, which needs more memory than this Mac has. You pay RunPod for computing
+      time only — the models are free open weights we install on the rented machine.</div>
 
-    <label>Engine URL</label>
-    <input type="text" id="rUrl" placeholder="http://127.0.0.1:8189   (SSH tunnel — recommended)">
-    <div class="hint">With an SSH tunnel this is a local address and the traffic is encrypted. A
-      <code>https://…proxy.runpod.net</code> URL also works but is reachable by anyone who learns it.</div>
+    <label>RunPod API key <small>— the only thing you need to fill in</small></label>
+    <input type="password" id="pKey" placeholder="rpa_…">
+    <div class="hint">console.runpod.io → Settings → API Keys → Create API Key. Stored on this Mac only.
+      <a href="https://www.console.runpod.io/user/settings" target="_blank" rel="noreferrer">Open that page ↗</a></div>
+    <button id="pSaveKey" style="margin-top:10px">Save key</button>
 
-    <label>Token <small>(only if the pod runs an auth proxy)</small></label>
-    <input type="text" id="rToken" placeholder="optional">
-
-    <label>Label</label>
-    <input type="text" id="rLabel" placeholder="e.g. RunPod H100 · Canada">
-
-    <label class="chk"><input type="checkbox" id="rDefault"> Use the rented GPU by default for new jobs</label>
-
-    <div class="row2" style="margin-top:16px">
-      <button id="rTest">Test connection</button>
-      <button class="primary" id="rSave" style="margin-top:0">Save</button>
+    <div id="pSetup" hidden>
+      <hr class="sep">
+      <div class="row2">
+        <div><label>GPU</label><select id="pGpu"></select></div>
+        <div><label>Where</label><select id="pDc"></select></div>
+      </div>
+      <div class="hint" id="pCost"></div>
+      <button class="primary" id="pLaunch">Rent this GPU and set it up</button>
+      <div class="hint">One button. It rents the machine, installs the models, and connects —
+        several minutes the first time, then it remembers the models for next time.</div>
     </div>
-    <div id="rResult" class="hint"></div>
-  </div>
-
-  <div class="panel form" style="max-width:680px;margin-top:18px">
-    <h3 style="margin-top:0">Rent a GPU from RunPod</h3>
-    <div class="hint">You pay RunPod for compute only. The models are open weights we download onto the pod —
-      nobody charges you for the model. Billing starts the moment a pod is created and stops when you stop it.</div>
-
-    <label>RunPod API key</label>
-    <input type="password" id="pKey" placeholder="paste key — stored on this Mac only, never shown again">
-    <div class="hint">Get one at <code>console.runpod.io/user/settings</code> → API Keys → Create API Key.</div>
-
-    <div class="row2">
-      <div><label>GPU</label><select id="pGpu"></select></div>
-      <div><label>Region</label><select id="pDc"></select></div>
-    </div>
-    <div class="hint" id="pCost"></div>
-
-    <label class="chk"><input type="checkbox" id="pVol" checked> Keep a 300&nbsp;GB model volume (~$21/mo) so the download happens once</label>
-
-    <div class="tools" style="margin-top:16px">
-      <button id="pLaunch">① Rent GPU</button>
-      <button id="pProvision">② Install models</button>
-      <button id="pConnect">③ Connect</button>
-      <button id="pStop">Stop (billing off)</button>
-    </div>
-    <button class="ghost" id="pTerminate" style="margin-top:8px;width:100%">Terminate pod &amp; delete it</button>
     <div id="pStatus" class="hint"></div>
+
+    <details style="margin-top:18px">
+      <summary>Advanced — connect to some other machine by hand</summary>
+      <div class="hint">Only needed if you are not using RunPod. Filled in automatically otherwise.</div>
+      <label class="chk" style="margin-top:10px"><input type="checkbox" id="rEnabled"> Enable</label>
+      <label>Engine URL</label><input type="text" id="rUrl" placeholder="http://127.0.0.1:8189">
+      <label>Token</label><input type="text" id="rToken" placeholder="optional">
+      <label>Label</label><input type="text" id="rLabel" placeholder="optional name">
+      <label class="chk"><input type="checkbox" id="rDefault"> Use it by default for new videos</label>
+      <div class="row2" style="margin-top:12px">
+        <button id="rTest">Test connection</button><button id="rSave">Save</button>
+      </div>
+      <div id="rResult" class="hint"></div>
+    </details>
   </div>
 </section>
+
+</main>
 
 <dialog id="pick"><h3>Append which clip?</h3><div id="pickGrid" class="grid small"></div><button class="ghost" onclick="pick.close()">Cancel</button></dialog>
 <input type="file" id="file" accept="image/*" hidden>

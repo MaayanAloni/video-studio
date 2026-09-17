@@ -1,4 +1,5 @@
 """Video Studio server: REST API + static GUI. Supervises the local ComfyUI engine."""
+import glob
 import os
 import re
 import subprocess
@@ -360,6 +361,33 @@ def post_job(body: dict):
         return jobs.submit(body.get("type", ""), body.get("params") or {})
     except (ValueError, KeyError, TypeError) as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/api/jobs/{jid}/frames")
+def job_frames(jid: str):
+    """Frames finished so far in a running job — segments land here as they complete."""
+    job = next((x for x in jobs.all_jobs() if x["id"] == jid), None)
+    if not job or not job.get("tmpdir"):
+        raise HTTPException(404)
+    files = sorted(glob.glob(os.path.join(job["tmpdir"], "clip*", "*.png")))
+    return {"count": len(files), "job": jid}
+
+
+@app.get("/api/jobs/{jid}/frames/{n}")
+def job_frame(jid: str, n: int, w: int = 260):
+    job = next((x for x in jobs.all_jobs() if x["id"] == jid), None)
+    if not job or not job.get("tmpdir"):
+        raise HTTPException(404)
+    files = sorted(glob.glob(os.path.join(job["tmpdir"], "clip*", "*.png")))
+    if not files:
+        raise HTTPException(404)
+    import io
+    from fastapi.responses import Response
+    im = Image.open(files[max(0, min(len(files) - 1, n))]).convert("RGB")
+    im.thumbnail((max(64, min(w, 1024)), 1024))
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=82)
+    return Response(buf.getvalue(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/jobs/{jid}/preview")
