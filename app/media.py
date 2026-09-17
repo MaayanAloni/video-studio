@@ -76,7 +76,7 @@ def health(frame_paths: list[str]) -> dict:
             "suspect": bool(drift > 25 and monotonic > 0.8)}
 
 
-def create_video(frame_paths: list[str], fps: float, info: dict) -> dict:
+def create_video(frame_paths: list[str], fps: float, info: dict, audio: str = None) -> dict:
     """Copy frames into a new video entry, encode mp4 + thumbnail, return meta."""
     from PIL import Image
 
@@ -89,6 +89,8 @@ def create_video(frame_paths: list[str], fps: float, info: dict) -> dict:
         shutil.copyfile(src, os.path.join(d, "frames", f"{i:06d}.png"))
     with Image.open(frame_paths[0]) as im:
         w, h = im.size
+    if audio and os.path.exists(audio):
+        shutil.copyfile(audio, os.path.join(d, "audio" + os.path.splitext(audio)[1]))
     encode(vid, fps)
     Image.open(frame_paths[0]).convert("RGB").resize((320, max(2, int(320 * h / w)))).save(os.path.join(d, "thumb.jpg"), quality=85)
     m = {"id": vid, "created": time.time(), "fps": fps, "width": w, "height": h, "frames": len(frame_paths),
@@ -100,10 +102,17 @@ def create_video(frame_paths: list[str], fps: float, info: dict) -> dict:
 
 def encode(vid, fps):
     d = vdir(vid)
-    ff("-framerate", str(fps), "-i", os.path.join(d, "frames", "%06d.png"),
-       # all-intra-ish short GOP so the browser can seek to exact frames in the editor
-       "-c:v", "libx264", "-crf", "14", "-preset", "slow", "-g", "8", "-pix_fmt", "yuv420p",
-       "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-movflags", "+faststart", os.path.join(d, "video.mp4"))
+    audio = next(iter(glob.glob(os.path.join(d, "audio.*"))), None)
+    args = ["-framerate", str(fps), "-i", os.path.join(d, "frames", "%06d.png")]
+    if audio:
+        args += ["-i", audio]
+    # all-intra-ish short GOP so the browser can seek to exact frames in the editor
+    args += ["-c:v", "libx264", "-crf", "14", "-preset", "slow", "-g", "8", "-pix_fmt", "yuv420p",
+             "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]
+    if audio:
+        args += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
+    args += ["-movflags", "+faststart", os.path.join(d, "video.mp4")]
+    ff(*args)
 
 
 def delete_video(vid):

@@ -89,11 +89,20 @@ class Engine:
 
     def loader_options(self, node: str, field: str) -> set:
         """What files can this loader node actually load? /models/<folder> only reports
-        safetensors, so .gguf weights are invisible there — ask the node instead."""
+        safetensors, so .gguf weights are invisible there — ask the node instead.
+        ComfyUI describes a choice list either as ["a","b"] or as ["COMBO", {"options": [...]}]
+        depending on version and node, so handle both."""
         try:
-            return set(self.object_info(node)[node]["input"]["required"][field][0])
-        except (KeyError, IndexError, TypeError):
+            spec = self.object_info(node)[node]["input"]["required"][field]
+        except (KeyError, TypeError):
             return set()
+        if not isinstance(spec, list) or not spec:
+            return set()
+        if isinstance(spec[0], list):
+            return set(spec[0])
+        if len(spec) > 1 and isinstance(spec[1], dict) and isinstance(spec[1].get("options"), list):
+            return set(spec[1]["options"])
+        return set()
 
     def unet_options(self) -> set:
         return self.loader_options("UNETLoader", "unet_name") | self.loader_options("UnetLoaderGGUF", "unet_name")
@@ -126,26 +135,34 @@ class Engine:
     def _collect(self, history: dict, dest_dir: str) -> list[str]:
         """Bring rendered frames into dest_dir, from disk (local) or over HTTP (remote)."""
         os.makedirs(dest_dir, exist_ok=True)
-        items = []
+        items, audio = [], []
         for out in history.get("outputs", {}).values():
             items += out.get("images", [])
+            audio += out.get("audio", [])
         items.sort(key=lambda im: im["filename"])
+        for a in audio[:1]:              # H3 emits one audio track per clip
+            ext = os.path.splitext(a["filename"])[1] or ".flac"
+            self._fetch(a, os.path.join(dest_dir, "audio" + ext))
         paths = []
         for i, im in enumerate(items):
             dst = os.path.join(dest_dir, f"{i:06d}.png")
-            if self.local:
-                src = os.path.join(ENGINE_DIR, "output", im.get("subfolder", ""), im["filename"])
-                shutil.move(src, dst)
-            else:
-                r = requests.get(self.url + "/view", headers=self.headers, timeout=300, stream=True,
-                                 params={"filename": im["filename"], "subfolder": im.get("subfolder", ""),
-                                         "type": im.get("type", "output")})
-                r.raise_for_status()
-                with open(dst, "wb") as f:
-                    for chunk in r.iter_content(1 << 20):
-                        f.write(chunk)
+            self._fetch(im, dst)
             paths.append(dst)
         return paths
+
+    def _fetch(self, item: dict, dst: str):
+        """Move (local) or download (remote) one engine output file."""
+        if self.local:
+            src = os.path.join(ENGINE_DIR, "output", item.get("subfolder", ""), item["filename"])
+            shutil.move(src, dst)
+            return
+        r = requests.get(self.url + "/view", headers=self.headers, timeout=600, stream=True,
+                         params={"filename": item["filename"], "subfolder": item.get("subfolder", ""),
+                                 "type": item.get("type", "output")})
+        r.raise_for_status()
+        with open(dst, "wb") as f:
+            for chunk in r.iter_content(1 << 20):
+                f.write(chunk)
 
     # ---------------------------------------------------------------- run
     def run(self, graph: dict, dest_dir: str, on_progress=None, cancelled=lambda: False,

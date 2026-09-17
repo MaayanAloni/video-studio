@@ -45,6 +45,27 @@ MODELS = {
 }
 TEXT_ENCODER = "umt5-xxl-encoder-Q8_0.gguf"
 
+# MiniMax H3 — the strongest model that exists as downloadable weights (4th overall on
+# blind preference, above Veo 3.1 and Sora 2). Generates stereo audio in the same pass.
+# ~42.5 GB resident, so it only ever runs on a rented card.
+H3 = {
+    "fps": 24,
+    "grid": 32,
+    "unet": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    "vae_video": "minimax_h3_video_vae_fp16.safetensors",
+    "vae_audio": "minimax_h3_audio_vae_fp32.safetensors",
+    "width": 1344, "height": 768,
+}
+H3_MAX_FRAMES = 362          # trained range is ~124-362 (roughly 5-15 s at 24 fps)
+
+
+def snap_h3(frames: int) -> int:
+    """H3 latents live on a 17k+5 grid, unlike Wan's 4k+1. Round to the NEAREST
+    valid length so asking for 5 s gives 5.17 s, not 4.46 s."""
+    n = max(5, int(frames))
+    return min(H3_MAX_FRAMES, max(5, round((n - 5) / 17) * 17 + 5))
+
 # GGUF precision, best first. "max" walks this list and takes the highest one on disk;
 # "fast" pins Q4 so the distilled tiers stay quick.
 QUANT_ORDER = ["Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M"]
@@ -79,8 +100,11 @@ QUALITY = {
     "master":   {"model": "14b", "steps": 20, "cfg": 3.5, "fast": False, "quant": "max"},
     # remote only: unquantised weights, more steps. Needs ~40 GB VRAM.
     "ultra":    {"model": "14b", "steps": 30, "cfg": 4.0, "fast": False, "quant": "max", "full": True},
+    # MiniMax H3. No CFG and no negative prompt — guidance is distilled into the model.
+    "h3":       {"model": "h3", "steps": 20, "cfg": 1.0},
+    "h3_turbo": {"model": "h3", "steps": 6, "cfg": 1.0, "lora": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"},
 }
-REMOTE_ONLY = {"ultra"}
+REMOTE_ONLY = {"ultra", "h3", "h3_turbo"}
 
 
 def snap_len(frames: int) -> int:
@@ -94,10 +118,58 @@ def snap_dim(v: int, grid: int) -> int:
     return max(grid * 4, int(round(v / grid)) * grid)
 
 
+def build_h3(clip: dict) -> dict:
+    """MiniMax H3 graph: text/image -> video WITH synchronised audio.
+
+    Frames are still saved as PNGs so every downstream feature (range edits, joins,
+    extends) keeps working on frames; the audio is saved alongside and muxed locally.
+    """
+    q = QUALITY[clip["quality"]]
+    steps = int(clip.get("steps") or q["steps"])
+    w_, h_ = snap_dim(clip["width"], H3["grid"]), snap_dim(clip["height"], H3["grid"])
+    n = snap_h3(clip["frames"])
+    g = {
+        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": H3["clip"], "type": "minimax"}},
+        "vae_v": {"class_type": "VAELoader", "inputs": {"vae_name": H3["vae_video"]}},
+        "vae_a": {"class_type": "VAELoader", "inputs": {"vae_name": H3["vae_audio"]}},
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": H3["unet"], "weight_dtype": "default"}},
+    }
+    model = ["unet", 0]
+    if q.get("lora") and q["lora"] in (clip.get("available_loras") or set()):
+        g["lora"] = {"class_type": "LoraLoaderModelOnly",
+                     "inputs": {"model": model, "lora_name": q["lora"], "strength_model": 1.0}}
+        model = ["lora", 0]
+
+    cond = {"clip": ["clip", 0], "vae": ["vae_v", 0], "prompt": clip["prompt"],
+            "width": w_, "height": h_, "length": n}
+    for key, node in (("start_image", "first_frame"), ("end_image", "last_frame")):
+        if clip.get(key):
+            g[node] = {"class_type": "LoadImage", "inputs": {"image": clip[key]}}
+            cond[node] = [node, 0]
+    g["i2v"] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": cond}
+
+    g["guider"] = {"class_type": "BasicGuider", "inputs": {"model": model, "conditioning": ["i2v", 0]}}
+    g["sampler"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}}
+    g["sigmas"] = {"class_type": "BasicScheduler",
+                   "inputs": {"model": model, "scheduler": "simple", "steps": steps, "denoise": 1.0}}
+    g["noise"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(clip["seed"])}}
+    g["ks1"] = {"class_type": "SamplerCustomAdvanced",
+                "inputs": {"noise": ["noise", 0], "guider": ["guider", 0], "sampler": ["sampler", 0],
+                           "sigmas": ["sigmas", 0], "latent_image": ["i2v", 1]}}
+
+    g["dec"] = {"class_type": "VAEDecode", "inputs": {"samples": ["ks1", 0], "vae": ["vae_v", 0]}}
+    g["save"] = {"class_type": "SaveImage", "inputs": {"images": ["dec", 0], "filename_prefix": clip["prefix"]}}
+    g["deca"] = {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["ks1", 0], "vae": ["vae_a", 0]}}
+    g["savea"] = {"class_type": "SaveAudio", "inputs": {"audio": ["deca", 0], "filename_prefix": clip["prefix"]}}
+    return g
+
+
 def build(clip: dict) -> dict:
     """clip keys: prompt, negative, width, height, frames, seed, quality,
     cfg (optional override), start_image, end_image (ComfyUI input filenames), prefix"""
     q = dict(QUALITY[clip["quality"]])
+    if q["model"] == "h3":
+        return build_h3(clip)
     m = MODELS[q["model"]]
     cfg = float(clip.get("cfg") or q["cfg"])
     if q.get("fast"):
@@ -107,8 +179,11 @@ def build(clip: dict) -> dict:
     n = snap_len(clip["frames"])
     seed = int(clip["seed"])
     g = {}
-    full = bool(q.get("full")) and clip.get("available") is not None and m.get("clip_full") in (clip.get("available_clip") or set())
-    if full:
+    _ac = clip.get("available_clip")
+    _has_full_clip = m.get("clip_full") in (_ac or set())
+    _no_gguf_clip = _ac is not None and TEXT_ENCODER not in _ac
+    full = bool(q.get("full")) and clip.get("available") is not None and _has_full_clip
+    if _has_full_clip and (full or _no_gguf_clip):
         g["clip"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": m["clip_full"], "type": "wan"}}
     else:
         g["clip"] = {"class_type": "CLIPLoaderGGUF", "inputs": {"clip_name": TEXT_ENCODER, "type": "wan"}}
@@ -152,11 +227,14 @@ def build(clip: dict) -> dict:
             cond_pos, cond_neg, latent = ["fl", 0], ["fl", 1], ["fl", 2]
         for k in ("high", "low"):
             fullname = m.get(pre + k + "_full")
-            if full and fullname in (clip.get("available") or set()):
+            avail = clip.get("available")
+            gguf = pick_gguf(m[pre + k], clip.get("quant") or q.get("quant", "fast"), avail)
+            # use unquantised weights when asked for, and also when the engine simply
+            # has no GGUF (a rented box carries fp16 only) — better than failing
+            if fullname and (full or (avail is not None and gguf not in avail)) and fullname in (avail or set()):
                 g["u_" + k] = {"class_type": "UNETLoader", "inputs": {"unet_name": fullname, "weight_dtype": "default"}}
             else:
-                g["u_" + k] = {"class_type": "UnetLoaderGGUF", "inputs": {
-                    "unet_name": pick_gguf(m[pre + k], clip.get("quant") or q.get("quant", "fast"), clip.get("available"))}}
+                g["u_" + k] = {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": gguf}}
             src = ["u_" + k, 0]
             if q.get("fast"):
                 g["l_" + k] = {"class_type": "LoraLoaderModelOnly", "inputs": {

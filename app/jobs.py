@@ -18,7 +18,16 @@ JOBS_FILE = os.path.join(media.DATA, "jobs.json")
 PERF_FILE = os.path.join(media.DATA, "perf.json")
 PREVIEW_DIR = os.path.join(media.DATA, "previews")
 os.makedirs(PREVIEW_DIR, exist_ok=True)
-MAX_SECONDS = 5.0  # longest single model pass; anything longer is chained
+MAX_SECONDS = 5.0  # longest single Wan pass; anything longer is chained
+
+
+def model_shape(quality: str):
+    """(fps, grid, max_seconds_per_pass, snap_fn) — H3 has its own frame grid and can
+    do ~15 s in one pass, where Wan tops out around 5 s."""
+    if wf.QUALITY[quality]["model"] == "h3":
+        return wf.H3["fps"], wf.H3["grid"], wf.H3_MAX_FRAMES / wf.H3["fps"], wf.snap_h3
+    m = wf.MODELS[wf.QUALITY[quality]["model"]]
+    return m["fps"], m["grid"], MAX_SECONDS, wf.snap_len
 
 ASPECTS = {"16:9": (16, 9), "9:16": (9, 16), "1:1": (1, 1), "4:3": (4, 3), "3:4": (3, 4), "21:9": (21, 9)}
 RES_PIXELS = {"360p": 640 * 368, "480p": 832 * 480, "580p": 1024 * 576, "720p": 1280 * 704}
@@ -214,10 +223,12 @@ class Ctx:
     def __init__(self, job, total_clips):
         self.job, self.total, self.done = job, max(1, total_clips), 0
         self.engine = settings.engine_for(job["params"].get("compute"))
-        self.available = self.available_clip = None
+        self.available = self.available_clip = self.available_loras = None
+        self.audio = None
         if not self.engine.local:   # remote box has its own model set
             self.available = self.engine.unet_options()
             self.available_clip = self.engine.clip_options()
+            self.available_loras = self.engine.loader_options("LoraLoaderModelOnly", "lora_name")
             if not self.available:
                 raise comfy.EngineError("remote engine reported no loadable models")
         self.tmp = tempfile.mkdtemp(prefix="vs_", dir=media.DATA)
@@ -254,7 +265,7 @@ def render_clip(ctx: Ctx, clip: dict, label: str) -> list[str]:
     """Render one model pass, return frame paths inside ctx.tmp."""
     ctx.stage(label)
     clip = dict(clip, prefix=f"vs/{ctx.job['id']}_{ctx.done:03d}", available=ctx.available,
-                available_clip=ctx.available_clip)
+                available_clip=ctx.available_clip, available_loras=ctx.available_loras)
     eng = ctx.engine
     for k in ("start_image", "end_image"):
         if clip.get(k):
@@ -283,10 +294,18 @@ def render_clip(ctx: Ctx, clip: dict, label: str) -> list[str]:
     perf[clip["quality"]] = {"sec": time.time() - ctx.t_clip, "frames": len(out), "px": clip["width"] * clip["height"]}
     with open(PERF_FILE, "w") as f:
         json.dump(perf, f)
+    a = glob_audio(dst)
+    if a:
+        ctx.audio = a
     ctx.done += 1
     ctx.job["progress"] = round(ctx.done / ctx.total, 4)
     ctx.job["frames_done"] = ctx.job.get("frames_done", 0) + len(out)
     return out
+
+
+def glob_audio(d):
+    import glob as _g
+    return next(iter(sorted(_g.glob(os.path.join(d, "audio.*")))), None)
 
 
 def chain(ctx, segs, base, start_image, end_image, fps, max_frames):
@@ -325,19 +344,18 @@ def job_generate(job):
     p = job["params"]
     quality = p.get("quality", "standard")
     q = wf.QUALITY[quality]
-    model = wf.MODELS[q["model"]]
-    fps = model["fps"]
-    w, h = dims(p.get("aspect", "16:9"), p.get("resolution", "480p"), model["grid"])
+    fps, grid, max_s, snap = model_shape(quality)
+    w, h = dims(p.get("aspect", "16:9"), p.get("resolution", "480p"), grid)
     style = p.get("style", "")
     if p.get("segments"):
         segs = []
         for s in p["segments"]:
-            for sec in split_seconds(float(s.get("seconds") or 5)):
+            for sec in split_seconds(float(s.get("seconds") or 5), max_s):
                 segs.append({"prompt": full_prompt(s["prompt"], s.get("camera") or p.get("camera"), style),
-                             "frames": wf.snap_len(round(sec * fps))})
+                             "frames": snap(round(sec * fps))})
     else:
-        segs = [{"prompt": full_prompt(p["prompt"], p.get("camera"), style), "frames": wf.snap_len(round(sec * fps))}
-                for sec in split_seconds(float(p.get("seconds") or 5))]
+        segs = [{"prompt": full_prompt(p["prompt"], p.get("camera"), style), "frames": snap(round(sec * fps))}
+                for sec in split_seconds(float(p.get("seconds") or 5), max_s)]
     start = _upload_path(p["start_image"]) if p.get("start_image") else None
     end = _upload_path(p["end_image"]) if p.get("end_image") else None
     needs_still = q["model"] == "14b" and not start and not (len(segs) == 1 and end) and not t2v14_ready()
@@ -352,13 +370,13 @@ def job_generate(job):
                                           quality="draft", steps=24, cfg=5.0, start_image=None, end_image=None),
                                 "painting opening frame")
             start = still[-1]  # the 5B model paints poor single stills; the end of a short clip is clean
-        frames, marks = chain(ctx, segs, base, start, end, fps, wf.snap_len(int(MAX_SECONDS * fps)))
+        frames, marks = chain(ctx, segs, base, start, end, fps, snap(int(max_s * fps)))
         ctx.stage("encoding")
         info = {"op": "generate", "prompt": p.get("prompt") or segs[0]["prompt"], "params": p, "seed": base["seed"],
                 "segments": marks, "parent": None, "quality": quality}
         if p.get("name"):
             info["name"] = p["name"]
-        return media.create_video(frames, fps, info)
+        return media.create_video(frames, fps, info, audio=ctx.audio)
     finally:
         shutil.rmtree(ctx.tmp, ignore_errors=True)
 

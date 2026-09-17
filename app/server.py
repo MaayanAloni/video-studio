@@ -102,6 +102,7 @@ def status():
     free = os.statvfs(ROOT)
     st = settings_mod.load()["remote"]
     return {"engine": comfy.alive(), "models": model_status(), "perf": jobs._perf(),
+            "remote_models": _remote_models(),
             "remote": {"enabled": bool(st.get("enabled") and st.get("url")), "label": st.get("label", ""),
                        "default_for_new": bool(st.get("default_for_new"))},
             "disk_free_gb": round(free.f_bavail * free.f_frsize / 1e9, 1),
@@ -151,8 +152,10 @@ def rp_status():
     if cfg.get("api_key") and cfg.get("pod_id"):
         try:
             pod = rp.get_pod(cfg["api_key"], cfg["pod_id"])
-            ip, port = rp.ssh_target(pod)
-            out["pod"] = {"status": pod.get("desiredStatus"), "ip": ip, "ssh_port": port,
+            host, port, mode = rp.ssh_target(cfg["api_key"], cfg["pod_id"])
+            out["pod"] = {"status": pod.get("desiredStatus"),
+                          "container_up": rp.ready(cfg["api_key"], cfg["pod_id"]),
+                          "ip": host, "ssh_port": port, "ssh_mode": mode,
                           "cost_hr": pod.get("costPerHr") or pod.get("adjustedCostPerHr"),
                           "started": pod.get("lastStartedAt"), "name": pod.get("name")}
         except rp.RunPodError as e:
@@ -192,11 +195,11 @@ def rp_connect():
     if not (cfg.get("api_key") and cfg.get("pod_id")):
         return JSONResponse({"error": "no pod"}, status_code=400)
     try:
-        pod = rp.get_pod(cfg["api_key"], cfg["pod_id"])
-        ip, port = rp.ssh_target(pod)
-        if not ip:
-            return JSONResponse({"error": "pod has no public IP yet — still starting"}, status_code=409)
-        url = rp.open_tunnel(ip, port)
+        host, port, mode = rp.ssh_target(cfg["api_key"], cfg["pod_id"])
+        if not host:
+            return JSONResponse({"error": "the container is still starting (pulling the image can take "
+                                          "up to 30 minutes on a first deploy)"}, status_code=409)
+        url = rp.open_tunnel(host, port, mode)
         settings_mod.save({"remote": {"url": url, "enabled": True,
                                       "label": f"RunPod {cfg.get('gpu','')} · {cfg.get('datacenter','')}"}})
         eng = comfy.Engine(url, local=False)
@@ -221,16 +224,14 @@ def rp_provision(body: dict = None):
         pod = rp.get_pod(cfg["api_key"], cfg["pod_id"])
     except rp.RunPodError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    ip, port = rp.ssh_target(pod)
-    if not ip:
-        return JSONResponse({"error": "pod not reachable yet"}, status_code=409)
+    host, port, ssh_mode = rp.ssh_target(cfg["api_key"], cfg["pod_id"])
+    if not host:
+        return JSONResponse({"error": "pod not reachable yet — container still starting"}, status_code=409)
     script = os.path.join(ROOT, "remote", "setup_pod.sh")
-    mode = body.get("models") or cfg.get("models") or "full"
+    models_mode = body.get("models") or cfg.get("models") or "full"
     logf = os.path.join(ROOT, "logs", "provision.log")
     with open(script) as f, open(logf, "a") as out:
-        subprocess.Popen(["ssh", "-i", rp.KEY, "-o", "StrictHostKeyChecking=accept-new",
-                          "-o", "UserKnownHostsFile=" + os.path.join(rp.SSH_DIR, "known_hosts"),
-                          f"root@{ip}", "-p", str(port), "bash -s", mode],
+        subprocess.Popen(rp.ssh_base(host, port, ssh_mode) + ["bash -s", models_mode],
                          stdin=f, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
     return {"ok": True, "log": "logs/provision.log",
             "note": "downloading models on the pod; watch Logs → provision"}
@@ -290,6 +291,26 @@ def remote_test(body: dict = None):
             "unets": sorted(unets)[:40]}
 
 
+_rm_cache = {"at": 0.0, "val": {}}
+
+
+def _remote_models() -> dict:
+    """Which tiers the rented box can actually serve. Cached — it is an HTTP round trip."""
+    if time.time() - _rm_cache["at"] < 30:
+        return _rm_cache["val"]
+    eng = settings_mod.remote_engine()
+    val = {}
+    if eng:
+        try:
+            unets = eng.unet_options()
+            val = {"h3": wf.H3["unet"] in unets,
+                   "ultra": wf.MODELS["14b"]["high_full"] in unets}
+        except Exception:  # noqa: BLE001
+            val = {}
+    _rm_cache.update(at=time.time(), val=val)
+    return val
+
+
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...)):
     raw = await file.read()
@@ -326,12 +347,41 @@ def frame_as_upload(vid: str, n: int):
 
 LOG_FILES = {"engine": "engine.log", "server": "server.log", "downloads": "download2.log",
              "provision": "provision.log", "tunnel": "tunnel.log"}
+_remote_log = {"at": 0.0, "text": ""}
+
+
+def remote_log(lines: int = 400) -> str:
+    """Tail the rented pod's ComfyUI log over the same ssh key. Cached briefly so
+    polling the Logs tab doesn't open an ssh connection every second."""
+    now = time.time()
+    if now - _remote_log["at"] < 4:
+        return _remote_log["text"]
+    cfg = settings_mod.load()["runpod"]
+    if not (cfg.get("api_key") and cfg.get("pod_id")):
+        return "(no rented GPU configured)"
+    try:
+        host, port, ssh_mode = rp.ssh_target(cfg["api_key"], cfg["pod_id"])
+        if not host:
+            return "(pod not reachable)"
+        out = subprocess.run(rp.ssh_base(host, port, ssh_mode) +
+                             ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                              f"tail -c 200000 /workspace/comfy.log"],
+                             capture_output=True, text=True, timeout=40).stdout
+    except Exception as e:  # noqa: BLE001
+        return f"(could not read remote log: {str(e)[:200]})"
+    _remote_log.update(at=now, text=out)
+    return out
 _ANSI = re.compile(r"\x1B\[[0-9;]*[mGKHF]")
 
 
 @app.get("/api/logs/{name}")
 def logs(name: str, lines: int = 200):
     """Tail a log file, collapsing tqdm carriage-returns so progress bars read cleanly."""
+    if name == "remote":
+        raw = remote_log(lines)
+        out = [_ANSI.sub("", ln).rstrip() for ln in raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+        out = [ln for ln in out if ln.strip()]
+        return {"name": name, "text": "\n".join(out[-max(10, min(lines, 2000)):]), "size": len(raw)}
     fn = LOG_FILES.get(name)
     if not fn:
         raise HTTPException(404, "unknown log")

@@ -66,7 +66,9 @@
         <div class="card active" data-q="standard"><b>Standard</b><small>14B · 4 steps</small><i></i></div>
         <div class="card" data-q="pro"><b>Pro</b><small>14B · 8 steps</small><i></i></div>
         <div class="card" data-q="master"><b>Master</b><small>14B · 20 steps, full CFG</small><i></i></div>
-        <div class="card" data-q="ultra" hidden><b>Ultra</b><small>14B unquantised · 30 steps · rented GPU only</small><i></i></div>
+        <div class="card" data-q="ultra" hidden><b>Ultra</b><small>Wan 14B unquantised · 30 steps · rented GPU</small><i></i></div>
+        <div class="card" data-q="h3_turbo" hidden><b>H3 Turbo</b><small>MiniMax H3 · 6 steps · with audio</small><i></i></div>
+        <div class="card" data-q="h3" hidden><b>H3 Max</b><small>MiniMax H3 · 20 steps · best available · audio</small><i></i></div>
       </div>
 
       <div class="row3">
@@ -196,7 +198,8 @@
 <section id="view-logs" class="view">
   <div class="titlebar"><h2>Logs</h2>
     <select id="logPick" style="width:auto">
-      <option value="engine">engine — model loading, sampling steps, errors</option>
+      <option value="engine">this Mac — model loading, sampling steps, errors</option>
+      <option value="remote">rented GPU — sampling on the A100</option>
       <option value="server">server — job worker, API, tracebacks</option>
       <option value="downloads">downloads — model fetches</option>
     </select>

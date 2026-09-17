@@ -131,11 +131,34 @@ def terminate_pod(key: str, pod_id: str) -> dict:
     return _req("DELETE", f"/pods/{pod_id}", key)
 
 
-def ssh_target(pod: dict):
-    """(ip, port) for direct-TCP ssh, or (None, None) while the pod is still coming up."""
-    ip = pod.get("publicIp")
-    port = (pod.get("portMappings") or {}).get("22")
-    return (ip, port) if ip and port else (None, None)
+def runtime(key: str, pod_id: str) -> dict:
+    """Actual container state. REST's `desiredStatus: RUNNING` only means 'scheduled';
+    `runtime` stays null until the image is pulled and the container is really up,
+    and that is also when port mappings appear."""
+    q = ("query($id:String!){ pod(input:{podId:$id}){ id desiredStatus machine{podHostId} "
+         "runtime{ uptimeInSeconds ports{ ip isIpPublic privatePort publicPort type } } } }")
+    try:
+        r = requests.post(GRAPHQL, params={"api_key": key}, json={"query": q, "variables": {"id": pod_id}}, timeout=45)
+        return (r.json().get("data") or {}).get("pod") or {}
+    except (requests.RequestException, ValueError):
+        return {}
+
+
+def ssh_target(key: str, pod_id: str):
+    """(host, port, mode). mode 'direct' = root@ip -p port; 'proxy' = <podHostId>@ssh.runpod.io."""
+    p = runtime(key, pod_id)
+    rt = p.get("runtime") or {}
+    for prt in rt.get("ports") or []:
+        if prt.get("privatePort") == 22 and prt.get("ip"):
+            return prt["ip"], prt.get("publicPort"), "direct"
+    host = (p.get("machine") or {}).get("podHostId")
+    if host and rt:
+        return host, None, "proxy"
+    return None, None, None
+
+
+def ready(key: str, pod_id: str) -> bool:
+    return bool((runtime(key, pod_id).get("runtime") or {}).get("uptimeInSeconds") is not None)
 
 
 # ------------------------------------------------------------------ tunnel
@@ -144,21 +167,36 @@ _tunnel = {"proc": None, "pod": None, "since": None}
 
 def tunnel_up() -> bool:
     p = _tunnel["proc"]
-    return bool(p and p.poll() is None)
+    if p and p.poll() is None:
+        return True
+    # the ssh process outlives a server restart (own session), so also just ask the port
+    import socket
+    with socket.socket() as sk:
+        sk.settimeout(1)
+        return sk.connect_ex(("127.0.0.1", LOCAL_PORT)) == 0
 
 
-def open_tunnel(ip: str, port: int, remote_port: int = 8188, local_port: int = LOCAL_PORT):
+def ssh_base(host: str, port, mode: str) -> list:
+    """Common ssh args for either connection style."""
+    cmd = ["ssh", "-i", KEY,
+           "-o", "StrictHostKeyChecking=accept-new",
+           "-o", "UserKnownHostsFile=" + os.path.join(SSH_DIR, "known_hosts"),
+           "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=4"]
+    if mode == "direct":
+        cmd += [f"root@{host}", "-p", str(port)]
+    else:                       # RunPod's ssh proxy: user is the podHostId
+        cmd += [f"{host}@ssh.runpod.io"]
+    return cmd
+
+
+def open_tunnel(host: str, port, mode: str = "direct", remote_port: int = 8188, local_port: int = LOCAL_PORT):
     """ssh -N -L local:127.0.0.1:remote. Nothing about ComfyUI touches the internet."""
     close_tunnel()
     if not shutil.which("ssh"):
         raise RunPodError("ssh not found on this Mac")
-    cmd = ["ssh", "-N", "-i", KEY,
-           "-o", "StrictHostKeyChecking=accept-new",
-           "-o", "UserKnownHostsFile=" + os.path.join(SSH_DIR, "known_hosts"),
-           "-o", "ExitOnForwardFailure=yes",
-           "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=4",
-           "-L", f"{local_port}:127.0.0.1:{remote_port}",
-           f"root@{ip}", "-p", str(port)]
+    base = ssh_base(host, port, mode)
+    cmd = base[:1] + ["-N", "-o", "ExitOnForwardFailure=yes",
+                      "-L", f"{local_port}:127.0.0.1:{remote_port}"] + base[1:]
     log = open(os.path.join(media.ROOT, "logs", "tunnel.log"), "a")
     _tunnel["proc"] = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
                                        start_new_session=True)

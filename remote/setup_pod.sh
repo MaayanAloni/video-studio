@@ -5,8 +5,8 @@
 #
 #   full   ~120 GB  Wan 2.2 unquantised fp16 — best quality, Apache-2.0, needs >=48 GB VRAM
 #   fast    ~40 GB  Wan 2.2 Q8 quantised — good, fits a 24 GB card
-#   h3      ~43 GB  MiniMax H3 — strongest model, but commercial use of its output
-#                   needs a licence from Comfy. See REMOTE.md.
+#   h3      ~43 GB  MiniMax H3 — strongest downloadable model, generates audio too.
+#   full+h3 ~163 GB  both, so you can switch between them.
 #
 # ComfyUI is left bound to 127.0.0.1. Nothing is exposed to the internet; the Mac
 # reaches it through an SSH tunnel.
@@ -122,8 +122,9 @@ h3 = [
     (H3, "split_files/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "text_encoders"),
     (H3, "split_files/vae/minimax_h3_video_vae_fp16.safetensors", "vae"),
     (H3, "split_files/vae/minimax_h3_audio_vae_fp32.safetensors", "vae"),
+    (H3, "split_files/loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors", "loras"),
 ]
-items = common + {"full": full, "fast": fast, "h3": h3}.get(mode, full)
+items = common + {"full": full, "fast": fast, "h3": h3, "full+h3": full + h3}.get(mode, full)
 dl = os.path.join(comfy, "_dl")
 for repo, path, sub in items:
     dst = os.path.join(comfy, "models", sub, os.path.basename(path))

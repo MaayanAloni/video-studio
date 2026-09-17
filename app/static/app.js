@@ -77,8 +77,10 @@ function updateHints() {
   $$('#qualityCards .card').forEach(c => {
     const e = estimate(c.dataset.q, s, $('#resolution').value);
     $('i', c).textContent = e ? '≈ ' + fmtT(e) : '';
-    if (c.dataset.q === 'ultra') {           // unquantised weights: rented GPU only
-      c.hidden = !(S.status?.remote?.enabled);
+    if (['ultra', 'h3', 'h3_turbo'].includes(c.dataset.q)) {   // rented GPU only
+      const rm = S.status?.remote || {}, rmodels = S.status?.remote_models || {};
+      const isH3 = c.dataset.q.startsWith('h3');
+      c.hidden = !rm.enabled || (isH3 && rmodels.h3 === false);
       c.classList.toggle('off', S.compute !== 'remote');
       return;
     }
