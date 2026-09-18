@@ -48,7 +48,7 @@ async function drawSourcePicker() {
   if (S.srcVideo && !list.some(v => v.id === S.srcVideo)) S.srcVideo = null;
   if (!S.srcVideo && list.length) S.srcVideo = list[0].id;
   $('#srcPick').innerHTML = list.map(v =>
-    `<div class="s ${v.id === S.srcVideo ? 'sel' : ''}" data-src="${v.id}">
+    `<div class="s ${v.id === S.srcVideo ? 'picked' : ''}" data-src="${v.id}">
        <div class="th" style="background-image:url(/videos/${v.id}/thumb.jpg)"></div>
        <div class="lb">${v.seconds}s · ${esc(v.quality || '')}</div></div>`).join('')
     || '<div class="hint">No videos yet — make one first, then you can extend it.</div>';
