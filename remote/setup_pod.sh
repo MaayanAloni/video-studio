@@ -30,6 +30,20 @@ if [ -z "$COMFY" ]; then
   pip install -q -r "$COMFY/requirements.txt"
 fi
 echo "==> using ComfyUI at $COMFY"
+
+# The RunPod image ships ComfyUI 0.30.0, which lacks MiniMaxH3AddGuide (needed to pin
+# start/end frames on top of reference images). Pull up to a version that has it.
+NEED_VER="${COMFY_VERSION:-v0.36.0}"
+if [ -d "$COMFY/.git" ]; then
+  CUR="$(cd "$COMFY" && git describe --tags --abbrev=0 2>/dev/null || echo unknown)"
+  if [ "$CUR" != "$NEED_VER" ]; then
+    echo "==> updating ComfyUI $CUR -> $NEED_VER"
+    (cd "$COMFY" && git fetch --tags --depth 200 origin 2>/dev/null \
+       && git checkout -q "$NEED_VER" 2>/dev/null \
+       && pip install -q -r requirements.txt) \
+       && echo "   updated" || echo "   !! update failed, staying on $CUR"
+  fi
+fi
 PY_BIN="$(command -v python3 || command -v python)"
 
 # ---------------------------------------------------------------- custom nodes

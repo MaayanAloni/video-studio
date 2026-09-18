@@ -85,6 +85,8 @@
         <div class="card" data-q="h3" hidden><b>H3 Max</b><small>MiniMax H3 · 20 steps · best available · audio</small><i></i></div>
       </div>
 
+      <div class="hint" id="tierHint"></div>
+
       <div class="row3">
         <div><label>Duration (s)</label><input type="number" id="seconds" value="5" min="1" step="1"></div>
         <div><label>Aspect</label><select id="aspect"></select></div>
@@ -166,12 +168,24 @@
         </div>
         <button class="primary" id="btnRegen" disabled>Regenerate range</button>
 
-        <h3>Extend</h3>
-        <textarea id="exPrompt" rows="3" placeholder="What happens next? (blank = continue original prompt)"></textarea>
+        <h3>Extend — continue this video</h3>
+        <div class="hint">The last frame becomes the first frame of new footage. Add a new prompt and
+          new reference images; the result is one longer video you can extend again.</div>
+        <textarea id="exPrompt" rows="3" placeholder="What happens next? (blank = continue the original prompt)"></textarea>
         <div class="row2">
-          <div><label>Add seconds</label><input type="number" id="exSeconds" value="5" min="1"></div>
+          <div><label>Add seconds</label><input type="number" id="exSeconds" value="10" min="1"></div>
           <div><label>Camera</label><select id="exCamera"></select></div>
         </div>
+        <div class="row2">
+          <div><label>Model</label><select id="exQuality"></select></div>
+          <div><label>Seed</label><input type="number" id="exSeed" placeholder="random"></div>
+        </div>
+        <div id="exRefsBox" hidden>
+          <label>Reference images for the new part <small>— up to 9</small></label>
+          <div class="refstrip" id="exRefStrip"></div>
+          <button class="ghost" id="exAddRef">+ Add reference</button>
+        </div>
+        <div class="hint" id="exHint"></div>
         <button class="primary" id="btnExtend">Extend video</button>
 
         <h3>Tools</h3>

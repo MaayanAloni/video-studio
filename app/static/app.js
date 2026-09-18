@@ -11,7 +11,7 @@ const api = async (path, opt = {}) => {
 };
 const fmtT = s => s == null ? '' : s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
 
-const S = { refs: [], compute: 'local', mode: 't2v', quality: 'standard', images: {}, status: null, jobs: [], videos: [], cur: null, sel: null, loop: false, seenDone: new Set(), firstPoll: true };
+const S = { refs: [], exRefs: [], compute: 'local', mode: 't2v', quality: 'standard', images: {}, status: null, jobs: [], videos: [], cur: null, sel: null, loop: false, seenDone: new Set(), firstPoll: true };
 
 /* ------------------------------------------------------------ navigation */
 function show(view) {
@@ -89,9 +89,25 @@ function updateHints() {
   });
   const c = +$('#cfg').value; $('#cfgVal').textContent = c > 1 ? c : '(auto)';
   const isH3 = S.quality.startsWith('h3');
-  const canRef = isH3 && S.compute === 'remote' && (S.status?.remote_models || {}).h3_refs !== false;
+  const rm = S.status?.remote || {}, rmod = S.status?.remote_models || {};
+  const canRef = isH3 && S.compute === 'remote' && rmod.h3_refs !== false;
   $('#refsBox').hidden = !canRef;
   if (!canRef && S.refs.length) { S.refs = []; drawRefs(); }
+
+  // say WHY the better tiers are missing, instead of just hiding them
+  let why = '';
+  if (!rm.enabled) {
+    why = 'Ultra and MiniMax H3 (and reference images) need a rented GPU — add your RunPod API key in Settings.';
+  } else if (S.compute !== 'remote') {
+    why = 'Switch “Render on” to the rented GPU to use Ultra, H3 and reference images.';
+  } else if (isH3 && rmod.h3 === false) {
+    why = 'H3 is not installed on the rented GPU yet — Settings → rent/connect will install it.';
+  } else if (isH3 && rmod.h3_refs === false) {
+    why = 'Reference images need the H3 reference model, which is not on this GPU yet.';
+  } else if (canRef) {
+    why = 'Reference images work alongside start/end frames — you can use both together.';
+  }
+  $('#tierHint').textContent = why;
 }
 ['seconds', 'resolution', 'cfg'].forEach(id => $('#' + id).addEventListener('input', updateHints));
 
@@ -119,7 +135,11 @@ $$('.drop').forEach(d => {
 });
 $('#file').onchange = e => {
   const f = e.target.files[0];
-  if (f) { if (dropTarget === '__ref__') uploadRef(f); else uploadTo(dropTarget, f); }
+  if (f) {
+    if (dropTarget === '__ref__') uploadRef(f);
+    else if (dropTarget === '__exref__') uploadExRef(f);
+    else uploadTo(dropTarget, f);
+  }
   e.target.value = '';
 };
 async function uploadRef(file) {
@@ -141,6 +161,40 @@ $('#refStrip').addEventListener('click', e => {
   if (x) { S.refs.splice(+x.dataset.ref, 1); drawRefs(); }
 });
 $('#addRef').onclick = () => { dropTarget = '__ref__'; $('#file').click(); };
+
+/* extend-panel references (separate set from the Create page) */
+async function uploadExRef(file) {
+  const fd = new FormData(); fd.append('file', file);
+  try { const r = await api('/api/upload', { method: 'POST', body: fd });
+        if (S.exRefs.length < 9) S.exRefs.push(r); drawExRefs(); }
+  catch (e) { $('#edErr').textContent = 'Upload failed: ' + e.message; }
+}
+function drawExRefs() {
+  $('#exRefStrip').innerHTML = S.exRefs.map((r, i) =>
+    `<div class="ref" style="background-image:url(${r.url})"><span class="x" data-exref="${i}">✕</span><span class="n">${i + 1}</span></div>`).join('')
+    || '<div class="hint">none — the new part continues from the last frame alone</div>';
+  $('#exAddRef').disabled = S.exRefs.length >= 9;
+}
+$('#exRefStrip').addEventListener('click', e => {
+  const x = e.target.closest('[data-exref]');
+  if (x) { S.exRefs.splice(+x.dataset.exref, 1); drawExRefs(); }
+});
+$('#exAddRef').onclick = () => { dropTarget = '__exref__'; $('#file').click(); };
+function syncExtendPanel() {
+  const q = $('#exQuality').value || '';
+  const rm = S.status?.remote || {}, rmod = S.status?.remote_models || {};
+  const isH3 = q.startsWith('h3');
+  const canRef = isH3 && rm.enabled && rmod.h3_refs !== false;
+  $('#exRefsBox').hidden = !canRef;
+  if (!canRef && S.exRefs.length) { S.exRefs = []; drawExRefs(); }
+  const src = S.cur && S.cur.quality;
+  let hint = '';
+  if (isH3 && !rm.enabled) hint = 'H3 needs the rented GPU — set one up in Settings.';
+  else if (src && src.startsWith('h3') && !isH3) hint = 'This clip is H3 (24fps, with audio). Extending with a Wan tier re-times the new part and adds no sound.';
+  else if (canRef) hint = 'References apply to the new footage only, on top of the last frame.';
+  $('#exHint').textContent = hint;
+}
+$('#exQuality').onchange = syncExtendPanel;
 document.addEventListener('paste', e => {
   if (!$('#view-create').classList.contains('active') || S.mode === 't2v') return;
   const f = [...e.clipboardData.files].find(f => f.type.startsWith('image/'));
@@ -314,6 +368,11 @@ async function openEditor(id, keepSel = false) {
   vid.src = `/videos/${v.id}/video.mp4?${v.created}`; vid.loop = !S.loop;
   $('#edName').value = v.name; $('#edInfo').textContent = `${v.seconds}s · ${v.frames} frames @ ${v.fps}fps · ${v.width}×${v.height}`;
   $('#edDownload').href = `/api/videos/${v.id}/download`;
+  const tiers = Object.keys(S.status?.quality || {});
+  const rmEnabled = (S.status?.remote || {}).enabled;
+  $('#exQuality').innerHTML = tiers.filter(t => rmEnabled || !(S.status.quality[t].remote_only))
+    .map(t => `<option value="${t}" ${t === v.quality ? 'selected' : ''}>${t}</option>`).join('');
+  S.exRefs = []; drawExRefs(); syncExtendPanel();
   // versions: whole family tree of this video
   const root = [...lineage(v.id)].pop(), fam = S.videos.filter(x => [...lineage(x.id)].pop() === root).sort((a, b) => a.created - b.created);
   $('#edVersions').innerHTML = fam.map((x, i) => `<option value="${x.id}" ${x.id === v.id ? 'selected' : ''}>v${i + 1} · ${esc(x.op)} · ${x.seconds}s</option>`).join('');
@@ -394,7 +453,11 @@ $('#btnRegen').onclick = () => {
   if (!prompt) return $('#edErr').textContent = 'Describe what should happen in the range.';
   edJob('edit_range', { f0: S.sel[0], f1: S.sel[1], prompt, quality: $('#edQuality').value, seed: $('#edSeed').value === '' ? null : +$('#edSeed').value });
 };
-$('#btnExtend').onclick = () => edJob('extend', { prompt: $('#exPrompt').value.trim(), seconds: +$('#exSeconds').value || 5, camera: $('#exCamera').value, quality: $('#edQuality').value });
+$('#btnExtend').onclick = () => edJob('extend', {
+  prompt: $('#exPrompt').value.trim(), seconds: +$('#exSeconds').value || 10,
+  camera: $('#exCamera').value, quality: $('#exQuality').value,
+  seed: $('#exSeed').value === '' ? null : +$('#exSeed').value,
+  ref_images: S.exRefs.map(r => r.name), ref_size: 'match' });
 $('#tKeep').onclick = () => edJob('trim', { f0: S.sel[0], f1: S.sel[1], mode: 'keep' });
 $('#tCut').onclick = () => edJob('trim', { f0: S.sel[0], f1: S.sel[1], mode: 'cut' });
 $('#tReverse').onclick = () => edJob('reverse', {});
@@ -502,12 +565,15 @@ function rpCost() {
 $('#pGpu').onchange = rpCost;
 const rpSay = (t, err) => $('#pStatus').innerHTML = err ? `<span style="color:var(--err)">${esc(t)}</span>` : esc(t);
 
+$('#pKey').addEventListener('keydown', e => { if (e.key === 'Enter') $('#pSaveKey').click(); });
 $('#pSaveKey').onclick = async () => {
   const k = $('#pKey').value.trim();
   if (!k) return rpSay('paste your key first', true);
   try {
     await api('/api/settings', { method: 'PUT', body: { runpod: { api_key: k } } });
-    $('#pSetup').hidden = false; rpSay('key saved. Now choose a GPU and rent it.'); rpLoadCatalog();
+    $('#pSetup').hidden = false; $('#pKey').value = '';
+    $('#pKey').placeholder = '✓ key saved — paste a new one only to replace it';
+    rpSay('✓ key saved. Now choose a GPU below and press Rent.'); rpLoadCatalog();
   } catch (e) { rpSay(e.message, true); }
 };
 
@@ -515,31 +581,12 @@ $('#pSaveKey').onclick = async () => {
 $('#pLaunch').onclick = async () => {
   const o = $('#pGpu').selectedOptions[0];
   if (!confirm(`Rent ${o ? o.textContent : 'this GPU'}?\n\nBilling starts now and runs until you press Stop.`)) return;
-  $('#pLaunch').disabled = true;
   try {
-    rpSay('renting a GPU…');
-    await api('/api/runpod/launch', { method: 'POST', body: { gpu: $('#pGpu').value, datacenter: $('#pDc').value, use_volume: true } });
-    rpSay('waiting for the machine to boot (this can take several minutes)…');
-    let ip = null;
-    for (let i = 0; i < 150; i++) {
-      const s = await api('/api/runpod/status'); rpBadge(s);
-      if (s.pod && s.pod.ip) { ip = s.pod.ip; break; }
-      await new Promise(r => setTimeout(r, 6000));
-    }
-    if (!ip) { rpSay('the machine is taking unusually long to boot — check the RunPod console', true); return; }
-    rpSay('installing models on the rented machine (watch Logs → provision)…');
-    await api('/api/runpod/provision', { method: 'POST', body: {} });
-    rpSay('connecting…');
-    let ok = false;
-    for (let i = 0; i < 120; i++) {
-      try { const r = await api('/api/runpod/connect', { method: 'POST', body: {} }); if (r.engine_reachable) { ok = true; break; } } catch {}
-      await new Promise(r => setTimeout(r, 10000));
-    }
-    rpSay(ok ? 'ready — pick Ultra quality in Create and set “Render on” to the rented GPU.'
-            : 'machine is up, still installing. This page will keep checking; Ultra appears when it is ready.');
-    await pollStatus();
+    await api('/api/runpod/setup', { method: 'POST', body: {
+      gpu: $('#pGpu').value, datacenter: $('#pDc').value, models: 'h3' } });
+    rpSay('setting up — this keeps running even if you close this page.');
+    rpPoll();
   } catch (e) { rpSay(e.message, true); }
-  finally { $('#pLaunch').disabled = false; }
 };
 
 async function rpStop(action) {
@@ -568,7 +615,15 @@ function rpBadge(s) {
 }
 
 async function rpPoll() {
-  try { const s = await api('/api/runpod/status'); rpBadge(s); return s; } catch { return null; }
+  try {
+    const s = await api('/api/runpod/status');
+    rpBadge(s);
+    const su = s.setup || {};
+    if (su.running) { rpSay(`setting up: ${su.step}…  (safe to close this page)`); setTimeout(rpPoll, 5000); }
+    else if (su.error) rpSay('setup failed: ' + su.error, true);
+    else if (su.done) rpSay('✓ ready — pick H3 in Create and set “Render on” to the rented GPU.');
+    return s;
+  } catch { return null; }
 }
 
 /* ------------------------------------------------------------ boot */

@@ -158,6 +158,7 @@ def rp_catalog():
 def rp_status():
     cfg = settings_mod.load()["runpod"]
     out = {"configured": bool(cfg.get("api_key")), "pod_id": cfg.get("pod_id", ""),
+           "setup": dict(_setup),
            "gpu": cfg.get("gpu"), "datacenter": cfg.get("datacenter"),
            "tunnel": rp.tunnel_status(), "pod": None}
     if cfg.get("api_key") and cfg.get("pod_id"):
@@ -172,6 +173,94 @@ def rp_status():
         except rp.RunPodError as e:
             out["error"] = str(e)
     return out
+
+
+_setup = {"running": False, "step": "", "error": "", "done": False, "at": 0.0}
+
+
+def _setup_worker(gpu: str, dc: str, models: str, volume_gb: int):
+    """Rent -> wait for the container -> install models -> connect, all server side.
+    The browser used to drive this; closing the tab stranded a paid pod half-configured."""
+    def step(s):
+        _setup.update(step=s, at=time.time())
+        print("[setup]", s, flush=True)
+    try:
+        cfg = settings_mod.load()["runpod"]
+        key = cfg["api_key"]
+        if not cfg.get("pod_id"):
+            vol = cfg.get("volume_id")
+            if not vol:
+                step("creating model volume")
+                vol = rp.create_volume(key, "video-studio-models", volume_gb, dc).get("id", "")
+            step("renting GPU")
+            pod = rp.create_pod(key, gpu, dc, vol)
+            settings_mod.save({"runpod": {"pod_id": pod["id"], "gpu": gpu, "datacenter": dc,
+                                          "volume_id": vol or "", "models": models}})
+            rp.set_pod(pod["id"])
+        pid = settings_mod.load()["runpod"]["pod_id"]
+
+        step("waiting for the machine to boot")
+        host = None
+        for _ in range(200):                       # first boot can take ~30 min
+            host, port, mode = rp.ssh_target(key, pid)
+            if host:
+                break
+            time.sleep(6)
+        if not host:
+            raise RuntimeError("machine never became reachable — check the RunPod console")
+
+        step("connecting")
+        url = rp.open_tunnel(host, port, mode)
+        settings_mod.save({"remote": {"url": url, "enabled": True,
+                                      "label": f"RunPod {gpu} · {dc}"}})
+        eng = comfy.Engine(url, local=False)
+        for _ in range(60):
+            if eng.alive(5):
+                break
+            time.sleep(5)
+
+        step(f"installing models ({models}) — this is the long part")
+        rp_provision({"models": models})
+        for _ in range(720):                       # up to 2h for a big model pull
+            time.sleep(10)
+            try:
+                with open(os.path.join(ROOT, "logs", "provision.log")) as f:
+                    txt = f.read()
+            except OSError:
+                continue
+            if "models ready" in txt:
+                break
+        step("restarting engine with the new models")
+        for _ in range(90):
+            if eng.alive(5):
+                break
+            time.sleep(5)
+        rp.open_tunnel(host, port, mode)           # the pod restarts ComfyUI; refresh the tunnel
+        _rm_cache["at"] = 0.0
+        step("ready")
+        _setup["done"] = True
+    except Exception as e:  # noqa: BLE001
+        _setup["error"] = str(e)[:300]
+        step("failed")
+    finally:
+        _setup["running"] = False
+
+
+@app.post("/api/runpod/setup")
+def rp_setup(body: dict = None):
+    """One call does everything and keeps running even if the browser goes away."""
+    body = body or {}
+    cfg = settings_mod.load()["runpod"]
+    if not cfg.get("api_key"):
+        return JSONResponse({"error": "set your RunPod API key first"}, status_code=400)
+    if _setup["running"]:
+        return {"ok": True, "already": True, "step": _setup["step"]}
+    _setup.update(running=True, step="starting", error="", done=False, at=time.time())
+    threading.Thread(target=_setup_worker, daemon=True, args=(
+        body.get("gpu") or cfg["gpu"], body.get("datacenter") or cfg["datacenter"],
+        body.get("models") or cfg.get("models") or "h3",
+        int(body.get("volume_gb") or cfg.get("volume_gb") or 100))).start()
+    return {"ok": True, "step": "starting"}
 
 
 @app.post("/api/runpod/launch")

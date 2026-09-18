@@ -167,6 +167,15 @@ def validate(jtype, p):
                 raise ValueError("prompt is required")
         if jtype == "join" and not os.path.exists(media.vdir(p.get("other", "?"))):
             raise ValueError("second video not found")
+        if jtype == "extend":
+            q = p.get("quality") or media.meta(p["video"]).get("quality") or "standard"
+            if p.get("ref_images") and wf.QUALITY.get(q, {}).get("model") != "h3":
+                raise ValueError("reference images need an H3 tier — pick H3 Turbo or H3 Max")
+            if q in wf.REMOTE_ONLY and p.get("compute") != "remote":
+                raise ValueError(f"{q} needs the rented GPU")
+            for r in (p.get("ref_images") or []):
+                if not os.path.exists(_upload_path(r)):
+                    raise ValueError("a reference image is missing")
     else:
         raise ValueError("unknown job type")
 
@@ -234,6 +243,7 @@ class Ctx:
         self.engine = settings.engine_for(job["params"].get("compute"))
         self.available = self.available_clip = self.available_loras = None
         self.audio = None
+        self.audio_parts = []      # H3 emits audio per pass; a long clip has several
         if not self.engine.local:   # remote box has its own model set
             self.available = self.engine.unet_options()
             self.available_clip = self.engine.clip_options()
@@ -307,6 +317,7 @@ def render_clip(ctx: Ctx, clip: dict, label: str) -> list[str]:
         json.dump(perf, f)
     a = glob_audio(dst)
     if a:
+        ctx.audio_parts.append(a)
         ctx.audio = a
     ctx.done += 1
     ctx.job["progress"] = round(ctx.done / ctx.total, 4)
@@ -390,7 +401,7 @@ def job_generate(job):
                 "segments": marks, "parent": None, "quality": quality}
         if p.get("name"):
             info["name"] = p["name"]
-        return media.create_video(frames, fps, info, audio=ctx.audio)
+        return media.create_video(frames, fps, info, audio=media.join_audio(ctx.audio_parts, ctx.tmp))
     finally:
         shutil.rmtree(ctx.tmp, ignore_errors=True)
 
@@ -400,27 +411,62 @@ def _edit_quality(p):
     return q if wf.QUALITY[q]["model"] == "14b" else "standard"
 
 
+def extend_quality(p, source_meta):
+    """Pick the tier for an extension. Keep the source video's model family where we can —
+    silently swapping an H3 clip to Wan would change the frame rate and drop the audio."""
+    want = p.get("quality")
+    if want and want in wf.QUALITY:
+        return want
+    src_q = source_meta.get("quality")
+    if src_q in wf.QUALITY:
+        return src_q
+    return "standard"
+
+
 def job_extend(job):
+    """Continue an existing video: its last frame becomes the first frame of new
+    footage, with a fresh prompt and its own reference images."""
     p = job["params"]
     m = media.meta(p["video"])
     src = media.frames_of(p["video"])
-    quality = _edit_quality(p)
-    secs = split_seconds(float(p.get("seconds") or 5))
-    fps = m["fps"]
+    quality = extend_quality(p, m)
+    fps, grid, max_s, snap = model_shape(quality)
+    out_fps = m["fps"]                      # the existing video sets the frame rate
+    secs = split_seconds(float(p.get("seconds") or 5), max_s)
     ctx = Ctx(job, len(secs))
     try:
-        base = {"negative": p.get("negative"), "width": m["width"], "height": m["height"], "seed": seed_of(p),
-                "quality": quality, "cfg": p.get("cfg")}
+        base = {"negative": p.get("negative"), "width": m["width"], "height": m["height"],
+                "seed": seed_of(p), "quality": quality, "cfg": p.get("cfg"),
+                "ref_images": [_upload_path(r) for r in (p.get("ref_images") or [])],
+                "ref_size": p.get("ref_size")}
         prompt = full_prompt(p.get("prompt") or m.get("prompt", ""), p.get("camera"))
-        segs = [{"prompt": prompt, "frames": wf.snap_len(round(s * fps))} for s in secs]
+        segs = [{"prompt": prompt, "frames": snap(round(s * fps))} for s in secs]
         end = _upload_path(p["end_image"]) if p.get("end_image") else None
-        new, marks = chain(ctx, segs, base, src[-1], end, fps, 81)
-        off = len(src) - 1
-        marks = [{"start": max(k["start"] + off, len(src)), "end": k["end"] + off, "prompt": k["prompt"]} for k in marks]
+        new, marks = chain(ctx, segs, base, src[-1], end, fps, snap(int(max_s * fps)))
+        new = new[1:]                       # first frame is the source's last frame
+
+        # a 24 fps model extending a 16 fps clip must be re-timed, or it plays in slow motion
+        if abs(fps - out_fps) > 0.01:
+            ctx.stage("matching frame rate")
+            new = media.resample_frames(new, fps, out_fps, os.path.join(ctx.tmp, "retimed"))
+
+        audio = None
+        if ctx.audio_parts or media.audio_of(m["id"]):
+            ctx.stage("joining audio")
+            head = media.audio_of(m["id"]) or media.silence(len(src) / out_fps,
+                                                            os.path.join(ctx.tmp, "head.wav"))
+            tail = ctx.audio_parts or [media.silence(len(new) / out_fps,
+                                                     os.path.join(ctx.tmp, "tail.wav"))]
+            audio = media.join_audio([head] + tail, ctx.tmp)
+
+        off = len(src)
+        marks = [{"start": max(k["start"] + off - 1, off), "end": min(k["end"] + off - 1, off + len(new) - 1),
+                  "prompt": k["prompt"]} for k in marks]
         ctx.stage("encoding")
-        return media.create_video(src + new[1:], fps, {
-            "op": "extend", "prompt": m.get("prompt"), "params": p, "parent": m["id"], "name": m.get("name"),
-            "segments": (m.get("segments") or []) + marks, "quality": quality})
+        return media.create_video(src + new, out_fps, {
+            "op": "extend", "prompt": p.get("prompt") or m.get("prompt"), "params": p,
+            "parent": m["id"], "name": m.get("name"),
+            "segments": (m.get("segments") or []) + marks, "quality": quality}, audio=audio)
     finally:
         shutil.rmtree(ctx.tmp, ignore_errors=True)
 

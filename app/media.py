@@ -52,6 +52,51 @@ def list_videos() -> list[dict]:
     return sorted(out, key=lambda m: -m["created"])
 
 
+def silence(seconds: float, path: str):
+    """A silent track, so audio from a later segment doesn't slide over earlier footage."""
+    ff("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+       "-t", f"{max(0.02, seconds):.3f}", path)
+    return path
+
+
+def resample_frames(paths: list, src_fps: float, dst_fps: float, outdir: str) -> list:
+    """Re-time a frame sequence so it plays at dst_fps without changing real duration.
+    Nearest-frame selection: nothing is invented, frames are dropped or held."""
+    if not paths or abs(src_fps - dst_fps) < 0.01:
+        return paths
+    os.makedirs(outdir, exist_ok=True)
+    n = len(paths)
+    out_n = max(1, round(n / src_fps * dst_fps))
+    out = []
+    for i in range(out_n):
+        src = paths[min(n - 1, round(i * (n - 1) / max(1, out_n - 1)))]
+        dst = os.path.join(outdir, f"{i:06d}.png")
+        shutil.copyfile(src, dst)
+        out.append(dst)
+    return out
+
+
+def audio_of(vid: str):
+    return next(iter(sorted(glob.glob(os.path.join(vdir(vid), "audio.*")))), None)
+
+
+def join_audio(parts: list, tmpdir: str):
+    """A multi-pass clip has one audio file per pass. Concatenate them in order —
+    using only the last one would (with -shortest) silently truncate the video."""
+    parts = [p for p in (parts or []) if p and os.path.exists(p)]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    listfile = os.path.join(tmpdir, "audio_parts.txt")
+    with open(listfile, "w") as f:
+        for p in parts:
+            f.write(f"file '{os.path.abspath(p)}'\n")
+    out = os.path.join(tmpdir, "audio_joined" + os.path.splitext(parts[0])[1])
+    ff("-f", "concat", "-safe", "0", "-i", listfile, "-c", "copy", out)
+    return out
+
+
 def health(frame_paths: list[str]) -> dict:
     """Detect silent MPS output corruption (ComfyUI issue #15793): on some Apple Silicon
     chips Wan output degrades progressively along the clip with no error raised. Real
@@ -110,7 +155,8 @@ def encode(vid, fps):
     args += ["-c:v", "libx264", "-crf", "14", "-preset", "slow", "-g", "8", "-pix_fmt", "yuv420p",
              "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]
     if audio:
-        args += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
+        # pad rather than truncate: the video is the authority on length
+        args += ["-c:a", "aac", "-b:a", "192k", "-af", "apad", "-shortest"]
     args += ["-movflags", "+faststart", os.path.join(d, "video.mp4")]
     ff(*args)
 
