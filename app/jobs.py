@@ -11,6 +11,7 @@ import uuid
 
 import comfy
 import media
+import runpod as rp
 import settings
 import workflows as wf
 
@@ -590,6 +591,8 @@ def _worker():
                 traceback.print_exc()
                 job.update(status="error", stage="error", error=str(e)[:800])
             finally:
+                if job["params"].get("compute") == "remote":
+                    rp.clean_outputs(job["id"])      # frames are downloaded; free the pod's volume
                 _cancel.discard(job["id"])
                 try:
                     os.remove(os.path.join(PREVIEW_DIR, job["id"] + ".jpg"))

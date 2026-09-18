@@ -262,7 +262,14 @@ def _setup_worker(gpu: str, dc: str, models: str, volume_gb: int):
         _rm_cache["at"] = 0.0
         # don't claim success until the engine actually offers what we installed
         want = {"h3": "h3", "full": "ultra", "full+h3": "h3"}.get(models)
-        have = _remote_models()
+        _rm_cache["at"] = 0.0          # the 30s cache made this verdict race the install
+        have = {}
+        for _ in range(6):             # give the engine a moment to finish listing models
+            have = _remote_models()
+            if have.get(want) is True:
+                break
+            _rm_cache["at"] = 0.0
+            time.sleep(5)
         if want and have.get(want) is not True:
             raise RuntimeError(f"models installed but the engine is not offering {want} "
                                f"- see Logs > rented GPU (got {have})")
@@ -495,7 +502,7 @@ def remote_log(lines: int = 400) -> str:
             return "(pod not reachable)"
         out = subprocess.run(rp.ssh_base(host, port, ssh_mode) +
                              ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
-                              f"tail -c 200000 /workspace/comfy.log"],
+                              f"tail -c 200000 /var/log/vs-comfy.log"],
                              capture_output=True, text=True, timeout=40).stdout
     except Exception as e:  # noqa: BLE001
         return f"(could not read remote log: {str(e)[:200]})"

@@ -111,7 +111,7 @@ log "starting the engine"
 pkill -f "vs/ComfyUI/main.py" 2>/dev/null; sleep 2
 cd "$VS/ComfyUI"
 nohup "$PY" main.py --listen 127.0.0.1 --port 8199 --preview-method auto --preview-size 1024 \
-  --disable-auto-launch > /workspace/comfy.log 2>&1 &
+  --disable-auto-launch > /var/log/vs-comfy.log 2>&1 &
 for _ in $(seq 1 90); do
   curl -sf http://127.0.0.1:8199/system_stats >/dev/null 2>&1 && break; sleep 2
 done
@@ -129,6 +129,6 @@ for n in ("MiniMaxH3ImageToVideo", "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGui
 PY
   echo "================================================================"
 else
-  echo "!! engine did not come up:"; tail -15 /workspace/comfy.log
+  echo "!! engine did not come up:"; tail -15 /var/log/vs-comfy.log
   exit 1
 fi

@@ -234,5 +234,27 @@ def tunnel_status() -> dict:
             "since": _tunnel["since"], "url": f"http://127.0.0.1:{LOCAL_PORT}"}
 
 
+def ssh_run(cmd: str, timeout: int = 120) -> str:
+    """Best-effort command on the current pod, using the stored key. Returns '' on failure."""
+    try:
+        import json as _j
+        cfg = _j.load(open(os.path.join(media.DATA, "settings.json")))["runpod"]
+        host, port, mode = ssh_target(cfg["api_key"], cfg["pod_id"])
+        if not host:
+            return ""
+        p = subprocess.run(ssh_base(host, port, mode) + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", cmd],
+                           capture_output=True, text=True, timeout=timeout)
+        return (p.stdout + p.stderr).strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def clean_outputs(prefix: str = "") -> str:
+    """Remote renders are downloaded but ComfyUI keeps its copy, so the pod's volume
+    fills up one clip at a time. Delete what we have already fetched."""
+    target = f"/workspace/vs/ComfyUI/output/vs/{prefix}*" if prefix else "/workspace/vs/ComfyUI/output/vs"
+    return ssh_run(f'rm -rf {target} 2>/dev/null; du -sh /workspace/vs/ComfyUI/output 2>/dev/null')
+
+
 def set_pod(pod_id: str):
     _tunnel["pod"] = pod_id
