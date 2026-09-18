@@ -11,7 +11,7 @@ const api = async (path, opt = {}) => {
 };
 const fmtT = s => s == null ? '' : s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
 
-const S = { refs: [], exRefs: [], compute: 'local', mode: 't2v', quality: 'standard', images: {}, status: null, jobs: [], videos: [], cur: null, sel: null, loop: false, seenDone: new Set(), firstPoll: true };
+const S = { refs: [], exRefs: [], srcVideo: null, compute: 'local', mode: 't2v', quality: 'standard', images: {}, status: null, jobs: [], videos: [], cur: null, sel: null, loop: false, seenDone: new Set(), firstPoll: true };
 
 /* ------------------------------------------------------------ navigation */
 function show(view) {
@@ -19,6 +19,7 @@ function show(view) {
   $$('.navbtn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   if (view !== 'editor') $('#vid').pause();
   if (view === 'library') renderLibrary();
+  if (view === 'create' && S.mode === 'extend') drawSourcePicker();
   if (view === 'logs') refreshLogs(true);
   if (view === 'settings') { loadSettings(); rpLoadCatalog(); rpPoll(); }
 }
@@ -31,10 +32,35 @@ function setMode(m) {
   $('#framesRow').hidden = m !== 'i2v';
   $('#singlePrompt').hidden = m === 'story';
   $('#storyBox').hidden = m !== 'story';
+  $('#extendBox').hidden = m !== 'extend';
   $('#seconds').disabled = m === 'story';
+  $('#generate').textContent = m === 'extend' ? 'Extend video' : 'Generate';
   if (m === 'story' && !$('#shots').children.length) { addShot(); addShot(); }
+  if (m === 'extend') drawSourcePicker();
   syncDrops(); updateHints();
 }
+
+/* choose which clip to continue */
+async function drawSourcePicker() {
+  if (!S.videos.length) await loadVideos();
+  const parents = new Set(S.videos.map(v => v.parent).filter(Boolean));
+  const list = S.videos.filter(v => !parents.has(v.id));      // newest version of each lineage
+  if (S.srcVideo && !list.some(v => v.id === S.srcVideo)) S.srcVideo = null;
+  if (!S.srcVideo && list.length) S.srcVideo = list[0].id;
+  $('#srcPick').innerHTML = list.map(v =>
+    `<div class="s ${v.id === S.srcVideo ? 'sel' : ''}" data-src="${v.id}">
+       <div class="th" style="background-image:url(/videos/${v.id}/thumb.jpg)"></div>
+       <div class="lb">${v.seconds}s · ${esc(v.quality || '')}</div></div>`).join('')
+    || '<div class="hint">No videos yet — make one first, then you can extend it.</div>';
+  const v = S.videos.find(x => x.id === S.srcVideo);
+  $('#srcInfo').textContent = v
+    ? `Continuing “${v.name}” — ${v.seconds}s, ${v.width}×${v.height}, ${v.fps}fps${v.quality ? ', ' + v.quality : ''}. Its last frame starts the new footage.`
+    : 'Pick a clip to continue.';
+}
+$('#srcPick').addEventListener('click', e => {
+  const s = e.target.closest('[data-src]');
+  if (s) { S.srcVideo = s.dataset.src; drawSourcePicker(); updateHints(); }
+});
 $$('#modeTabs .tab').forEach(t => t.onclick = () => setMode(t.dataset.mode));
 $$('#computeTabs .tab').forEach(t => t.onclick = () => {
   S.compute = t.dataset.compute;
@@ -90,7 +116,7 @@ function updateHints() {
   const c = +$('#cfg').value; $('#cfgVal').textContent = c > 1 ? c : '(auto)';
   const isH3 = S.quality.startsWith('h3');
   const rm = S.status?.remote || {}, rmod = S.status?.remote_models || {};
-  const canRef = isH3 && S.compute === 'remote' && rmod.h3_refs !== false;
+  const canRef = isH3 && S.compute === 'remote' && rmod.h3_refs === true;
   $('#refsBox').hidden = !canRef;
   if (!canRef && S.refs.length) { S.refs = []; drawRefs(); }
 
@@ -104,8 +130,12 @@ function updateHints() {
     why = 'H3 is not installed on the rented GPU yet — Settings → rent/connect will install it.';
   } else if (isH3 && rmod.h3_refs === false) {
     why = 'Reference images need the H3 reference model, which is not on this GPU yet.';
+  } else if (isH3 && S.compute === 'remote' && rmod.h3_refs !== true) {
+    why = 'Reference images need the rented GPU running — start it in Settings.';
   } else if (canRef) {
-    why = 'Reference images work alongside start/end frames — you can use both together.';
+    why = S.mode === 'extend'
+      ? 'Reference images apply to the new footage, on top of the last frame of the chosen clip.'
+      : 'Reference images work alongside start/end frames — you can use both together.';
   }
   $('#tierHint').textContent = why;
 }
@@ -216,8 +246,19 @@ $('#generate').onclick = async () => {
     if (!p.segments.length) return $('#createErr').textContent = 'Write at least one shot.';
     p.prompt = p.segments[0].prompt;
   } else { p.prompt = $('#prompt').value.trim(); p.seconds = +$('#seconds').value || 5; }
-  if (S.mode !== 't2v') { p.start_image = S.images.start_image?.name || null; p.end_image = S.images.end_image?.name || null; }
+  if (S.mode === 'i2v') { p.start_image = S.images.start_image?.name || null; p.end_image = S.images.end_image?.name || null; }
   if (S.mode === 'i2v' && !p.start_image && !p.end_image) return $('#createErr').textContent = 'Add a start (or end) frame, or use Text → Video.';
+  if (S.mode === 'extend') {
+    if (!S.srcVideo) return $('#createErr').textContent = 'Pick the video you want to continue.';
+    if (!p.prompt) return $('#createErr').textContent = 'Describe what happens next.';
+    try { await api('/api/jobs', { method: 'POST', body: { type: 'extend',
+            params: { video: S.srcVideo, prompt: p.prompt, seconds: p.seconds, camera: p.camera,
+                      quality: p.quality, seed: p.seed, negative: p.negative, compute: p.compute,
+                      ref_images: p.ref_images, ref_size: p.ref_size } } });
+          poll(); }
+    catch (e) { $('#createErr').textContent = e.message; }
+    return;
+  }
   try { await api('/api/jobs', { method: 'POST', body: { type: 'generate', params: p } }); poll(); }
   catch (e) { $('#createErr').textContent = e.message; }
 };
@@ -373,6 +414,7 @@ async function openEditor(id, keepSel = false) {
   $('#exQuality').innerHTML = tiers.filter(t => rmEnabled || !(S.status.quality[t].remote_only))
     .map(t => `<option value="${t}" ${t === v.quality ? 'selected' : ''}>${t}</option>`).join('');
   S.exRefs = []; drawExRefs(); syncExtendPanel();
+  const jump = $('#btnExtendTab'); if (jump) jump.onclick = () => { S.srcVideo = v.id; setMode('extend'); show('create'); };
   // versions: whole family tree of this video
   const root = [...lineage(v.id)].pop(), fam = S.videos.filter(x => [...lineage(x.id)].pop() === root).sort((a, b) => a.created - b.created);
   $('#edVersions').innerHTML = fam.map((x, i) => `<option value="${x.id}" ${x.id === v.id ? 'selected' : ''}>v${i + 1} · ${esc(x.op)} · ${x.seconds}s</option>`).join('');

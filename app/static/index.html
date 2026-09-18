@@ -29,6 +29,14 @@
         <button class="tab active" data-mode="t2v">Text → Video</button>
         <button class="tab" data-mode="i2v">Image → Video</button>
         <button class="tab" data-mode="story">Script / Storyboard</button>
+        <button class="tab" data-mode="extend">Extend a video</button>
+      </div>
+
+      <div id="extendBox" hidden>
+        <label>Video to continue</label>
+        <div class="srcpick" id="srcPick"></div>
+        <div class="hint" id="srcInfo">Pick a clip. Its last frame becomes the first frame of the new footage,
+          and you get back one longer video — which you can extend again.</div>
       </div>
 
       <div id="framesRow" class="row2" hidden>
@@ -168,6 +176,7 @@
         </div>
         <button class="primary" id="btnRegen" disabled>Regenerate range</button>
 
+        <button class="ghost" id="btnExtendTab" style="width:100%">↗ Extend this video (with references) →</button>
         <h3>Extend — continue this video</h3>
         <div class="hint">The last frame becomes the first frame of new footage. Add a new prompt and
           new reference images; the result is one longer video you can extend again.</div>

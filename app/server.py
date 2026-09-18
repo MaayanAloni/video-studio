@@ -187,17 +187,40 @@ def _setup_worker(gpu: str, dc: str, models: str, volume_gb: int):
     try:
         cfg = settings_mod.load()["runpod"]
         key = cfg["api_key"]
-        if not cfg.get("pod_id"):
+        pid = cfg.get("pod_id") or ""
+        if pid:
+            # a pod we already own may simply be stopped — start it rather than
+            # waiting forever for a machine that nobody asked to boot
+            try:
+                pod = rp.get_pod(key, pid)
+                if pod.get("desiredStatus") != "RUNNING":
+                    step("starting your stopped machine")
+                    try:
+                        rp.start_pod(key, pid)
+                    except rp.RunPodError as e:
+                        step("could not restart it, renting a fresh one")
+                        print("[setup] start failed:", e)
+                        pid = ""
+            except rp.RunPodError:
+                pid = ""            # it no longer exists on this account
+        if not pid:
             vol = cfg.get("volume_id")
+            if vol:                 # make sure the volume is still ours
+                try:
+                    vols = {x.get("id") for x in rp.volumes(key)}
+                    if vol not in vols:
+                        vol = ""
+                except rp.RunPodError:
+                    pass
             if not vol:
                 step("creating model volume")
                 vol = rp.create_volume(key, "video-studio-models", volume_gb, dc).get("id", "")
             step("renting GPU")
             pod = rp.create_pod(key, gpu, dc, vol)
-            settings_mod.save({"runpod": {"pod_id": pod["id"], "gpu": gpu, "datacenter": dc,
+            pid = pod["id"]
+            settings_mod.save({"runpod": {"pod_id": pid, "gpu": gpu, "datacenter": dc,
                                           "volume_id": vol or "", "models": models}})
-            rp.set_pod(pod["id"])
-        pid = settings_mod.load()["runpod"]["pod_id"]
+        rp.set_pod(pid)
 
         step("waiting for the machine to boot")
         host = None
