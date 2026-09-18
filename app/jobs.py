@@ -242,12 +242,14 @@ class Ctx:
         self.job, self.total, self.done = job, max(1, total_clips), 0
         self.engine = settings.engine_for(job["params"].get("compute"))
         self.available = self.available_clip = self.available_loras = None
+        self.has_addguide = None
         self.audio = None
         self.audio_parts = []      # H3 emits audio per pass; a long clip has several
         if not self.engine.local:   # remote box has its own model set
             self.available = self.engine.unet_options()
             self.available_clip = self.engine.clip_options()
             self.available_loras = self.engine.loader_options("LoraLoaderModelOnly", "lora_name")
+            self.has_addguide = self.engine.has_node("MiniMaxH3AddGuide")
             if not self.available:
                 raise comfy.EngineError("remote engine reported no loadable models")
         self.tmp = tempfile.mkdtemp(prefix="vs_", dir=media.DATA)
@@ -284,7 +286,8 @@ def render_clip(ctx: Ctx, clip: dict, label: str) -> list[str]:
     """Render one model pass, return frame paths inside ctx.tmp."""
     ctx.stage(label)
     clip = dict(clip, prefix=f"vs/{ctx.job['id']}_{ctx.done:03d}", available=ctx.available,
-                available_clip=ctx.available_clip, available_loras=ctx.available_loras)
+                available_clip=ctx.available_clip, available_loras=ctx.available_loras,
+                has_addguide=ctx.has_addguide)
     eng = ctx.engine
     for k in ("start_image", "end_image"):
         if clip.get(k):

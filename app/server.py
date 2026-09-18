@@ -251,7 +251,7 @@ def _setup_worker(gpu: str, dc: str, models: str, volume_gb: int):
                     txt = f.read()
             except OSError:
                 continue
-            if "models ready" in txt:
+            if "ENGINE UP" in txt or "!!" in txt:
                 break
         step("restarting engine with the new models")
         for _ in range(90):
@@ -356,11 +356,11 @@ def rp_provision(body: dict = None):
     host, port, ssh_mode = rp.ssh_target(cfg["api_key"], cfg["pod_id"])
     if not host:
         return JSONResponse({"error": "pod not reachable yet — container still starting"}, status_code=409)
-    script = os.path.join(ROOT, "remote", "setup_pod.sh")
+    script = os.path.join(ROOT, "remote", "setup_vs.sh")
     models_mode = body.get("models") or cfg.get("models") or "full"
     logf = os.path.join(ROOT, "logs", "provision.log")
     with open(script) as f, open(logf, "a") as out:
-        subprocess.Popen(rp.ssh_base(host, port, ssh_mode) + ["bash -s", models_mode],
+        subprocess.Popen(rp.ssh_base(host, port, ssh_mode) + ["bash -s"],
                          stdin=f, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
     return {"ok": True, "log": "logs/provision.log",
             "note": "downloading models on the pod; watch Logs → provision"}

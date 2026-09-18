@@ -31,32 +31,22 @@ if [ -z "$COMFY" ]; then
 fi
 echo "==> using ComfyUI at $COMFY"
 
-# The RunPod image ships ComfyUI 0.30.0, which lacks MiniMaxH3AddGuide (needed to pin
-# start/end frames on top of reference images). Pull up to a version that has it.
-NEED_VER="${COMFY_VERSION:-v0.36.0}"
+# ComfyUI must match the image's compiled libraries (comfy_kitchen). Upgrading ComfyUI
+# alone breaks the pairing: comfy_kitchen then lacks symbols the newer ComfyUI imports,
+# fp8/fp4 support disappears and H3 cannot load at all. ComfyUI lives on the network
+# volume, so a bad upgrade persists across pods — self-heal it here.
+IMAGE_VER="${COMFY_VERSION:-v0.30.0}"
 if [ -d "$COMFY/.git" ]; then
-  CUR="$(cd "$COMFY" && git describe --tags --abbrev=0 2>/dev/null || echo unknown)"
-  if [ "$CUR" != "$NEED_VER" ]; then
-    echo "==> updating ComfyUI $CUR -> $NEED_VER"
-    (cd "$COMFY" && git fetch --tags --force --depth 400 origin 2>/dev/null \
-       && git checkout -q "$NEED_VER" 2>/dev/null \
-       && pip install -q -r requirements.txt) \
-       && echo "   updated" || echo "   !! update failed, staying on $CUR"
+  if ! python3 -c "
+import sys; sys.path.insert(0, '$COMFY')
+import comfy.ldm.modules.attention" >/dev/null 2>&1; then
+    CUR="$(cd "$COMFY" && git describe --tags --abbrev=0 2>/dev/null || echo unknown)"
+    echo "==> ComfyUI $CUR cannot import against this image's libraries — reverting to $IMAGE_VER"
+    (cd "$COMFY" && git fetch --tags --force --depth 400 origin >/dev/null 2>&1; \
+     git checkout -q "$IMAGE_VER" && pip install -q -r requirements.txt) \
+      && echo "   reverted to $IMAGE_VER" || echo "   !! revert failed"
   fi
 fi
-
-# The image pins comfy_kitchen to its own ComfyUI version. After any ComfyUI upgrade it
-# must be upgraded too, or it fails to import and fp8/fp4 support silently disappears —
-# which breaks MiniMax H3 entirely (fp8_scaled model, nvfp4 text encoder).
-# pip installs to the CONTAINER disk, not the network volume, so this must run on
-# every pod, not just the first one.
-if ! python3 -c "from comfy_kitchen.tensor import AsymW4A8Int8Layout" 2>/dev/null; then
-  echo "==> comfy_kitchen is stale for this ComfyUI — upgrading (needed for fp8/fp4)"
-  pip install -q -U comfy_kitchen 2>&1 | tail -1
-  python3 -c "from comfy_kitchen.tensor import AsymW4A8Int8Layout; print('   fp8/fp4 support OK')" \
-    2>/dev/null || echo "   !! still broken — H3 fp8 weights will not load"
-fi
-PY_BIN="$(command -v python3 || command -v python)"
 
 # ---------------------------------------------------------------- custom nodes
 if [ ! -d "$COMFY/custom_nodes/ComfyUI-GGUF" ]; then

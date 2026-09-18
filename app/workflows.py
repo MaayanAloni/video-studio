@@ -188,7 +188,11 @@ def build_h3(clip: dict) -> dict:
             "ref_image_size": clip.get("ref_size") or "match",
             # autogrow input: a dict, keyed by the template prefix. A list crashes at runtime.
             "ref_images": {f"ref_image_{i}": [f"ref{i}", 0] for i in range(1, len(refs) + 1)}}}
-        anchors = [(k, idx) for k, idx in (("start_image", 0), ("end_image", -1)) if clip.get(k)]
+        # MiniMaxH3AddGuide only exists on newer ComfyUI. Without it, references still
+        # work — we just cannot also pin start/end frames in the same pass.
+        can_guide = clip.get("has_addguide") is not False
+        anchors = [(k, idx) for k, idx in (("start_image", 0), ("end_image", -1))
+                   if clip.get(k)] if can_guide else []
         for j, (key, frame_idx) in enumerate(anchors):
             node = f"guide{j}"
             g[node] = {"class_type": "LoadImage", "inputs": {"image": clip[key]}}

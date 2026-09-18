@@ -91,11 +91,22 @@ def create_volume(key: str, name: str, size_gb: int, dc: str) -> dict:
                 json={"name": name, "size": int(size_gb), "dataCenterId": dc})
 
 
+# Acceptable substitutes, best-value first. RunPod picks whichever has stock, which
+# matters because a single pinned type is often sold out in one datacentre.
+FALLBACK_GPUS = ["NVIDIA A100-SXM4-80GB", "NVIDIA A100 80GB PCIe",
+                 "NVIDIA RTX PRO 6000 Blackwell Server Edition", "NVIDIA H100 PCIe",
+                 "NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL", "NVIDIA H200"]
+
+
+def gpu_choices(preferred: str) -> list:
+    return [preferred] + [g for g in FALLBACK_GPUS if g != preferred]
+
+
 def create_pod(key: str, gpu: str, dc: str, volume_id: str = "", disk_gb: int = 60) -> dict:
     body = {
         "name": "video-studio",
         "imageName": "runpod/comfyui:latest",
-        "gpuTypeIds": [gpu],
+        "gpuTypeIds": gpu_choices(gpu),
         "gpuTypePriority": "availability",
         "gpuCount": 1,
         "cloudType": "SECURE",            # network volumes and a public IP need Secure Cloud
@@ -189,7 +200,10 @@ def ssh_base(host: str, port, mode: str) -> list:
     return cmd
 
 
-def open_tunnel(host: str, port, mode: str = "direct", remote_port: int = 8188, local_port: int = LOCAL_PORT):
+REMOTE_ENGINE_PORT = 8199   # our own engine on the pod; the image's ComfyUI keeps 8188
+
+
+def open_tunnel(host: str, port, mode: str = "direct", remote_port: int = REMOTE_ENGINE_PORT, local_port: int = LOCAL_PORT):
     """ssh -N -L local:127.0.0.1:remote. Nothing about ComfyUI touches the internet."""
     close_tunnel()
     if not shutil.which("ssh"):
