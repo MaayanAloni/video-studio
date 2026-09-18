@@ -260,6 +260,12 @@ def _setup_worker(gpu: str, dc: str, models: str, volume_gb: int):
             time.sleep(5)
         rp.open_tunnel(host, port, mode)           # the pod restarts ComfyUI; refresh the tunnel
         _rm_cache["at"] = 0.0
+        # don't claim success until the engine actually offers what we installed
+        want = {"h3": "h3", "full": "ultra", "full+h3": "h3"}.get(models)
+        have = _remote_models()
+        if want and have.get(want) is not True:
+            raise RuntimeError(f"models installed but the engine is not offering {want} "
+                               f"- see Logs > rented GPU (got {have})")
         step("ready")
         _setup["done"] = True
     except Exception as e:  # noqa: BLE001
