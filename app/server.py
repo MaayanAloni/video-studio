@@ -62,10 +62,29 @@ def ensure_engine():
         cwd=os.path.join(ROOT, "engine"), env=env, stdout=log, stderr=subprocess.STDOUT)
 
 
+def _reconnect_remote():
+    """The pod's ssh port changes when it restarts, which silently kills the tunnel and
+    strands any running job. Re-dial whenever the remote engine stops answering."""
+    st = settings_mod.load()
+    if not (st["remote"].get("enabled") and st["runpod"].get("pod_id")):
+        return
+    eng = settings_mod.remote_engine(st)
+    if eng and eng.alive(8):
+        return
+    try:
+        host, port, ssh_mode = rp.ssh_target(st["runpod"]["api_key"], st["runpod"]["pod_id"])
+        if host:
+            rp.open_tunnel(host, port, ssh_mode)
+            print("[watchdog] remote tunnel re-established")
+    except Exception as e:  # noqa: BLE001
+        print("[watchdog] tunnel reconnect failed:", str(e)[:120])
+
+
 def _watchdog():
     while True:
         try:
             ensure_engine()
+            _reconnect_remote()
         except Exception as e:  # noqa: BLE001
             print("engine watchdog:", e)
         time.sleep(10)
