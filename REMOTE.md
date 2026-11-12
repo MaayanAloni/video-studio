@@ -48,7 +48,9 @@ is never displayed again — the field shows `********` afterwards.
 
 ### 4. Choose GPU and region
 
-Defaults are **A100 80GB PCIe** in **CA-MTL-3 (Canada)**. Prices are pulled live.
+Defaults are **A100 80GB PCIe** in **CA-MTL-3 (Canada)**. Prices are pulled live. If that
+card is sold out, the app lets RunPod substitute another 80 GB+ card (A100 SXM, RTX PRO 6000,
+H100, H200), best value first.
 
 | GPU | VRAM | ~$/hr |
 |---|---|---|
@@ -70,27 +72,31 @@ EEA, so still GDPR territory.
 
 ## Each session
 
+One button, **Rent this GPU and set it up**, runs the whole sequence server-side (closing
+the tab does not strand a paid pod):
+
 | Step | What happens | Billing |
 |---|---|---|
-| **① Rent GPU** | Creates the pod and a 300 GB model volume | **starts now** |
-| wait | First boot can take several minutes, occasionally up to 30 | running |
-| **② Install models** | Downloads weights onto the pod over SSH | running |
-| **③ Connect** | Opens the SSH tunnel; Ultra appears in Create | running |
-| render | Pick **Ultra**, set *Render on* → Rented GPU | running |
-| **Stop** | Compute billing stops; the model volume is kept | **stops** |
+| create volume | A 100 GB network volume for the models (first time only) | — |
+| rent | Creates the pod, opens port 22 only | **starts now** |
+| boot | First boot can take several minutes, occasionally up to 30 | running |
+| connect | Opens the SSH tunnel | running |
+| install | `remote/setup_vs.sh` builds our own engine on the volume and downloads the models | running |
+| ready | Pick **H3 Turbo / H3 Max / Ultra**, set *Render on* → Rented GPU | running |
+| **Stop** | Sidebar badge → *Stop — end charges*. Compute billing stops; the volume is kept | **stops** |
 
-Watch the download in **Logs → provision**.
+Watch the install in **Logs → provision**.
 
-**Step ② only ever happens once.** The models live on the network volume, which
-survives stopping *and* terminating the pod. Next session you rent, connect, and go.
+**The install only ever downloads once.** The models live on the network volume, which
+survives stopping *and* terminating the pod. Next session is rent, connect, go.
 
 ---
 
 ## What it costs
 
 - **Compute:** billed per second while the pod runs. A100 80GB ≈ $1.59/hr.
-- **Model volume:** 300 GB ≈ **$21/month**, billed whether or not the pod is running.
-  This is the price of not re-downloading 120 GB every session.
+- **Model volume:** 100 GB ≈ **$7/month**, billed whether or not the pod is running.
+  This is the price of not re-downloading 66 GB every session.
 - **A 5-second Ultra clip:** I estimate 15–25 minutes on an A100, so roughly
   **$0.40–0.65**. That is an extrapolation, not a measurement — the first real render
   will tell us.
@@ -104,12 +110,20 @@ survives stopping *and* terminating the pod. Next session you rent, connect, and
 
 ## Models on the pod
 
-`remote/setup_pod.sh` takes a mode:
+`remote/setup_vs.sh` runs on the pod and takes a mode (the app sends the `models` value
+from `data/settings.json`; the button defaults to `h3`):
 
-- **`full`** (default, ~120 GB) — Wan 2.2 at **fp16, unquantised**: 28.58 GB per expert
+- **`h3`** (default, ~66 GB) — MiniMax H3 with the reference-image checkpoint and turbo LoRAs.
+- **`full`** (~120 GB) — Wan 2.2 at **fp16, unquantised**: 28.58 GB per expert
   plus an 11.37 GB fp16 text encoder. This is what **Ultra** uses. Apache 2.0, so the
-  output is yours with no strings.
+  output is yours with no strings. Needs `volume_gb` ≥ 160.
 - **`fast`** (~40 GB) — Q8 quantised. Good, and enough for Standard/Pro/Master.
+- **`full+h3`** (~163 GB) — both. Needs `volume_gb` ≥ 200.
+
+The script builds a self-contained engine in `/workspace/vs` (own Python env, ComfyUI pinned
+to v0.36.0) rather than using the one the RunPod image ships, because that one is welded to
+the image's libraries and breaks when either side is touched. It listens on the pod's
+loopback, port 8199, and the Mac tunnels to it.
 
 ### MiniMax H3 — read this before choosing it
 

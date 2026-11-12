@@ -1,6 +1,11 @@
+# local engine (ComfyUI clone + ~100 GB of model weights) — built by ./setup.sh
 engine/
 .venv/
 dl_cache/
+dl_cache_taesd/
+# your videos, uploads, settings (RunPod API key), ssh keys — never share these
 data/
 logs/
 __pycache__/
+*.pyc
+.DS_Store

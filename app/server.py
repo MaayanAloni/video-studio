@@ -386,7 +386,7 @@ def rp_provision(body: dict = None):
     models_mode = body.get("models") or cfg.get("models") or "full"
     logf = os.path.join(ROOT, "logs", "provision.log")
     with open(script) as f, open(logf, "a") as out:
-        subprocess.Popen(rp.ssh_base(host, port, ssh_mode) + ["bash -s"],
+        subprocess.Popen(rp.ssh_base(host, port, ssh_mode) + [f"bash -s {models_mode}"],
                          stdin=f, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
     return {"ok": True, "log": "logs/provision.log",
             "note": "downloading models on the pod; watch Logs → provision"}

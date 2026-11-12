@@ -88,7 +88,7 @@ def ssh(cmd, t=300):
 log("installing/starting our own engine (first time: torch download, a few minutes)")
 logf = os.path.join(ROOT, "logs", "setup_vs.log")
 with open(os.path.join(ROOT, "remote", "setup_vs.sh")) as f, open(logf, "w") as out:
-    p = subprocess.run(runpod.ssh_base(host, port, mode) + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=25", "bash -s"],
+    p = subprocess.run(runpod.ssh_base(host, port, mode) + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=25", f"bash -s {k.get('models') or 'h3'}"],
                        stdin=f, stdout=out, stderr=subprocess.STDOUT, timeout=2400)
 txt = open(logf).read()
 for line in txt.splitlines():

@@ -3,13 +3,17 @@
 Local, offline video generation studio for Apple Silicon. Nothing leaves this machine; there is no
 prompt filter, account, or per-video cost. Models: **Wan 2.2** (Apache-2.0 — outputs are yours).
 
+    ./setup.sh     # once: tools, python env, ComfyUI engine, ~55 GB of models (see SETUP.md)
     ./start.sh     # opens http://127.0.0.1:7860
     ./stop.sh
+
+**New machine?** Follow [SETUP.md](SETUP.md) — it covers the local install and, optionally,
+renting a GPU from RunPod, start to finish.
 
 ## What's inside
 | Piece | Path | Notes |
 |---|---|---|
-| Engine | `engine/` | ComfyUI + ComfyUI-GGUF, runs on Metal (MPS), bound to 127.0.0.1 only |
+| Engine | `engine/` | ComfyUI + ComfyUI-GGUF, runs on Metal (MPS), bound to 127.0.0.1 only. Not in git: `./setup.sh` builds it |
 | Models | `engine/models/` | Wan2.2 I2V-A14B (GGUF Q4_K_M, high+low noise experts), Wan2.2 TI2V-5B, umT5-XXL Q8, lightx2v 4-step LoRAs |
 | Server | `app/server.py` | FastAPI; job queue, engine watchdog, media API |
 | Jobs | `app/jobs.py` | generate / extend / edit_range / trim / join / reverse / interpolate / upscale |
@@ -33,6 +37,12 @@ Draft = 5B/12 steps · Standard = 14B/4 steps (lightx2v) · Pro = 14B/8 steps ·
 Generation is slow on a laptop GPU: ~20 min for a 2 s 480p Standard clip. Use 360p to iterate, then re-run
 the same seed at 480p/720p. Close other heavy apps — the 14B model wants ~16 GB of unified memory.
 
+## Renting a GPU (optional)
+Settings → Rented GPU → paste a RunPod API key → **Rent this GPU and set it up**. One button rents an
+A100, installs the models on a persistent volume, and connects over an SSH tunnel. Unlocks **Ultra** and
+**MiniMax H3** (with audio). Details and costs: [SETUP.md](SETUP.md) part 2, design notes: [REMOTE.md](REMOTE.md).
+
 ## Tests
-    python tests/gui_test.py       # headless browser smoke test
-    python tests/api_ops_test.py   # tools + validation
+    .venv/bin/python tests/logic_test.py     # frame accounting, GPU mocked
+    .venv/bin/python tests/gui_test.py       # headless browser smoke test
+    .venv/bin/python tests/api_ops_test.py   # tools + validation

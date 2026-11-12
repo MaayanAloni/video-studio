@@ -1,0 +1,11 @@
+# Video Studio app dependencies. The ComfyUI engine's own requirements are installed
+# separately by ./setup.sh from engine/requirements.txt into the same virtualenv.
+fastapi>=0.115
+uvicorn>=0.30
+requests>=2.32
+websocket-client>=1.8
+huggingface_hub>=0.34
+hf_transfer>=0.1.8
+Pillow>=10
+# tests only
+playwright>=1.45
